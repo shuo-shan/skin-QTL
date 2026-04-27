@@ -1,0 +1,64 @@
+---
+title: "rmark_skin-eQTL_ATACseq_intersect_ChIPseq"
+author: "Shuo Shan"
+date: "05/09/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r package, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(DESeq2)
+library(DEXSeq)
+library(BiocParallel)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(edgeR)
+library(gridExtra)
+
+setwd("/nl/umw_manuel_garber/human/skin/eQTLs/chromatin")
+```
+
+## H3K27ac ChIP-seq data analysis
+
+## Load in merged narrowPeak files
+```{r load}
+frb.chip.f="/nl/umw_manuel_garber/human/skin/eQTLs/chromatin/ATAC_H3K27acChIP_intersect_FRB.bed"
+krt.chip.f="/nl/umw_manuel_garber/human/skin/eQTLs/chromatin/ATAC_H3K27acChIP_intersect_KRT.bed"
+mel.chip.f="/nl/umw_manuel_garber/human/skin/eQTLs/chromatin/ATAC_H3K27acChIP_intersect_MEL.bed"
+
+# histogram of size distribution
+f=read.table(file=mel.chip.f,sep="\t",header=FALSE) %>%
+  set_colnames(c("chr","start","end","id")) %>%
+  mutate(size=end-start+1)
+this.title=paste0("mel.chipXatac peaks, median size: ",as.character(median(f$size))," , count: ",as.character(length(f$size)))
+ggplot(f, aes(x=size)) +
+  geom_histogram(binwidth=50,color="darkblue", fill="lightblue") + labs(title=this.title)
+
+# 
+
+
+
+# write tables to file
+write.table(res.df, file=paste0("/nl/umw_manuel_garber/human/skin/eQTLs/ChIP-seq/R","/MEL_narrowPeaks.txt"), quote=F, sep="\t", row.names=T, col.names=T)
+
+
+```
+
+
+
+
+
+
+
+
+
+

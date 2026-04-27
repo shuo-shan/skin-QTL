@@ -1,0 +1,92 @@
+---
+title: "skin_eqtl_genotype_analysis"
+author: "Shuo Shan"
+date: "7/5/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Intro  
+Processes merged vcf file for 44 genotyped donors. Cluster them genome-wide. Reference scripts: Dropbox
+```{r load, warning=F}
+library(dplyr)
+library(tidyverse)
+library(BiocParallel)
+library(magrittr)
+library(stringr)
+library(vcfR)
+library(cluster) # for gower similarity and pam
+library(ggplot2) # for visualization
+dir="/nl/umw_manuel_garber/human/skin/eQTLs/donor_genotyping/hg38"
+setwd(dir)
+```
+
+```{r prep}
+# filtered, pruned vcf file (minAC=1, ld r2 <= 0.8)
+vcf <- read.vcfR(paste0(dir,"/vcf/merged/bd841628-fcc2-487a-8460-f5428237f0c9.13donors.filtered2.pruned.vcf.gz"))
+#vcf <- read.vcfR(paste0(dir,"/vcf/merged/bd841628-fcc2-487a-8460-f5428237f0c9.filtered.2.3donors.vcf.gz"))
+# filtered, non-pruned vcf file (minAC=1)
+#vcf <- read.vcfR(paste0(dir,"/vcf/merged/bd841628-fcc2-487a-8460-f5428237f0c9.merged.filtered.2.13donors.vcf.gz"))
+vcf_table <- as_tibble(cbind(vcf@fix,vcf@gt))
+vcf_table <- vcf_table %>% filter(!is.na(ID)) %>% unite(mergedID,c("ID","REF","ALT"),sep=":",remove=F)
+
+vcf_table2 <- data.frame(lapply(vcf_table, function(x) {gsub("0/0.+", "HomoRef", x)}))
+vcf_table2 <- data.frame(lapply(vcf_table2, function(x) {gsub("1/1.+", "HomoAlt", x)}))
+vcf_table2 <- data.frame(lapply(vcf_table2, function(x) {gsub("1/0.+", "Het", x)}))
+vcf_table2 <- data.frame(lapply(vcf_table2, function(x) {gsub("0/1.+", "Het", x)}))
+
+vcf_table3 <- data.frame(lapply(vcf_table, function(x) {gsub("0/0.+", "1", x)}))
+vcf_table3 <- data.frame(lapply(vcf_table3, function(x) {gsub("1/1.+", "0", x)}))
+vcf_table3 <- data.frame(lapply(vcf_table3, function(x) {gsub("1/0.+", "0.5", x)}))
+vcf_table3 <- data.frame(lapply(vcf_table3, function(x) {gsub("0/1.+", "0.5", x)}))
+vcf_table3 <- vcf_table3 %>% dplyr::select(-c("CHROM","POS","ID","REF","ALT","QUAL","FILTER","INFO","FORMAT")) %>% column_to_rownames("mergedID")
+colnames(vcf_table3) <- colnames(vcf_table3) %>%
+  gsub("\\.", "-", .) %>%
+  gsub("X149430e7-6d2d-4e50-baba-3e8f044ce2e3", "F27", .) %>%
+  gsub("X5b67f1d5-29b4-448f-b9a3-d23a2d12cd93", "F30", .) %>%
+  gsub("d8380c80-b025-4d9b-9d06-67ee06eac4ad",  "F31", .) %>%
+  gsub("X5df7279b-bef9-44b3-a1c1-87b3318b79d4", "F34", .) %>%
+  gsub("e7b548bc-bed5-4a30-b4d9-0151966e6b9d",  "F41", .) %>%
+  gsub("f4a987ea-ca08-4b38-8668-48e5efe45076",  "F45", .) %>%
+  gsub("f0b571af-c87e-4611-8288-bfcf4f9e9133",  "F46", .) %>%
+  gsub("b0690c72-9cf6-465f-b5dc-e0b94fe8c8f3",  "F49", .) %>%
+  gsub("edbb9163-65d7-4fc8-9d14-627d0987f087",  "F50", .) %>%
+  gsub("X57948dd0-a324-4477-a917-c33f9c4e2daf", "F51", .) %>%
+  gsub("X383fe24c-a10e-424e-abcf-29d1e2a61c5d", "F52", .) %>%
+  gsub("X8f482258-bffd-40ca-be3a-487644f0c52f", "F55", .) %>%
+  gsub("X29026b76-493d-4f87-9e3b-800e311c19ed", "F56", .)
+
+
+# transpose vcf2_table_select
+vcf_table3_transposed <- as_tibble(cbind(names=colnames(vcf_table3),t(vcf_table3)))
+# turn values into numeric
+vcf_table3_transposed[,2:ncol(vcf_table3_transposed)] <- 
+  apply(vcf_table3_transposed[,2:ncol(vcf_table3_transposed)], 2, function(x) as.numeric(as.character(x)))
+
+#gower_dist <- daisy(vcf_table3_transposed[, -1], metric = "gower")
+#summary(gower_dist)
+#aggl.clust.c.gower <- hclust(gower_dist, method = "complete")
+#aggl.clust.c.gower$labels=as.character(vcf_table3_transposed$names)
+#plot(aggl.clust.c.gower, main = "Agglomerative, complete linkages")
+write.table(vcf_table3, file=paste0(dir,"/13donors.vcf_table3.txt"), quote=F, sep="\t")
+write.table(vcf_table3_transposed, file=paste0(dir,"/13donors.vcf_table3_transposed.txt"), quote=F, sep="\t")
+
+manhattan_dist <- daisy(vcf_table3_transposed[, -1], metric = "manhattan")
+#summary(manhattan_dist)
+aggl.clust.c.manhattan <- hclust(manhattan_dist, method = "complete")
+aggl.clust.c.manhattan$labels=as.character(vcf_table3_transposed$names)
+plot(aggl.clust.c.manhattan, main = "Agglomerative, complete linkages")
+manhattan_cluster_cut3<- cutree(aggl.clust.c.manhattan, k=7)
+donors_manhattan_cluster_cut3 <- tibble(vcf_table3_transposed$names,manhattan_cluster_cut3) %>% arrange(manhattan_cluster_cut3)
+print(donors_manhattan_cluster_cut3, n=Inf)
+
+
+```
+
+```{r reference-script}
+
+
+```

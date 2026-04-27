@@ -1,0 +1,345 @@
+---
+title: "skineQTL_model2025_test1"
+author: "Crystal Shan"
+date: "2025-07-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+notes:
+F138 doesn't have genotype data?
+# [don't run] archive code for getting ERAP2 expression for IFNG eQTL and IFNG reQTL.
+```{r rankNorm fun, warning=FALSE}
+# INT stands for rank-based inverse normal transformation
+# function
+rankNorm <- function (y) {
+  # input y: numeric vector of CPM across all genes per donor.
+  k <- 0.375 # an offset to ensure the z-score is finite. from Blom transform.
+  n <- length(y)
+  # Ranks.
+  r <- rank(y, ties.method = "average") # if same value, same rank
+  # Apply transformation.
+  r.prob <- (r - k) / (n - 2 * k + 1)
+  y.rankNorm <- stats::qnorm(r.prob) # because qnorm(1) is infinite and qnorm(-1) is -Inf
+  return(y.rankNorm)
+}
+```
+
+metadata$biosample = paste0(metadata$donor,"_",metadata$celltype, "_", metadata$condition)
+df = data.frame(biosample=metadata$biosample, 
+                donor=metadata$donor_num,
+                counts=as.numeric(counts["ERAP2",]), 
+                CPM=as.numeric(CPM["ERAP2",]),
+                libsize=colSums(counts))
+df.MELIFNG = df[metadata$celltype=="MEL"&metadata$condition=="IFNG",]
+df.MELIFNG$rankNormCPM=rankNorm(df.MELIFNG$CPM)
+metadata.MELIFNG = metadata[metadata$celltype=="MEL"&metadata$condition=="IFNG",]
+
+df.MEL = df[metadata$celltype=="MEL"&(metadata$condition=="PBS"|metadata$condition=="IFNG"),]
+df.MEL$rankNormCPM=rankNorm(df.MEL$CPM)
+metadata.MEL = metadata[metadata$celltype=="MEL"&(metadata$condition=="PBS"|metadata$condition=="IFNG"),]
+
+outDir="/pi/manuel.garber-umw/human/skin/eQTLs/DREG/2025models/test1/"
+saveRDS(df.MELIFNG, paste0(outDir,"/ERAP_expression_MEL_IFNG.rds"))
+saveRDS(metadata.MELIFNG, paste0(outDir,"/metadata_MEL_IFNG.rds"))
+saveRDS(df.MEL, paste0(outDir,"/ERAP_expression_MEL_PBSandIFNG.rds"))
+saveRDS(metadata.MEL, paste0(outDir,"/metadata_MEL_PBSandIFNG.rds"))
+```
+
+# load data
+```{r load}
+library(dplyr)
+library(ggplot2)
+#library(DESeq2)
+#library(BiocParallel)
+library(magrittr)
+library(stringr)
+#library(gplots)
+#library(ggrepel)
+#library(ggfortify)
+#library(reactable)
+#library(gridExtra)
+
+load(here::here("notebooks/QTL_model_testing1.RData"))
+# Dir="~/Downloads/nl/human/skin/eQTLs/DREG/2025models/test1/"
+# df.MEL.IFNG <- readRDS(paste0(Dir,"/ERAP_expression_MEL_IFNG.rds"))
+# df.MEL.IFNG$donor <- paste0("F", df.MEL.IFNG$donor)
+# df.MEL.IFNG$loglibsize <- log(df.MEL.IFNG$libsize)
+# metadata.MEL.IFNG <- readRDS(paste0(Dir,"/metadata_MEL_IFNG.rds"))
+# df.MEL.PBSIFNG <- readRDS(paste0(Dir,"/ERAP_expression_MEL_PBSandIFNG.rds"))
+# df.MEL.PBSIFNG$donor <- paste0("F", df.MEL.PBSIFNG$donor)
+# df.MEL.PBSIFNG$loglibsize <- log(df.MEL.PBSIFNG$libsize)
+# df.MEL.PBSIFNG <- df.MEL.PBSIFNG[rownames(df.MEL.PBSIFNG)!="F34_MEL_PBS_S1", ]
+# df.MEL.PBSIFNG$condition <- ordered(gsub("F.*_MEL_","", df.MEL.PBSIFNG$biosample),
+#                                     levels = c("PBS","IFNG"))
+# metadata.MEL.PBSIFNG <- readRDS(paste0(Dir,"/metadata_MEL_PBSandIFNG.rds"))
+# metadata.MEL.PBSIFNG <- metadata.MEL.PBSIFNG[metadata.MEL.PBSIFNG$sample!="F34_MEL_PBS_S1", ]
+# 
+# snpinfo <- data.table::fread(paste0(Dir,"/snp.bed")) %>% t() %>% 
+#   as.data.frame() %>% 
+#   rownames_to_column("donor") %>%
+#   set_colnames(c("donor","GT"))
+# snpinfo$donor <- gsub("skineQTL-","",snpinfo$donor)
+# REF <- "T"
+# ALT <- "C"
+# 
+# genotype <- snpinfo[7:nrow(snpinfo), ]
+# genotype <- genotype %>%
+#   mutate(
+#     genotype.num = case_when(
+#       GT == "0|0" ~ 0,
+#       GT %in% c("0|1", "1|0") ~ 1,
+#       GT == "1|1" ~ 2,
+#       TRUE ~ NA_real_
+#     ),
+#     genotype.nt = case_when(
+#       GT == "0|0" ~ "TT",
+#       GT == "0|1" ~ "TC|CT",
+#       GT == "1|0" ~ "TC|CT",
+#       GT == "1|1" ~ "CC",
+#       TRUE ~ NA_character_
+#     )
+#   )
+# genotype$donor <- sub("^F0", "F", genotype$donor)
+```
+# plotting
+```{r plotting}
+this.snp <- "rs2910686"
+snp.ref <- "T"
+snp.alt <- "C"
+this.gene <- "ERAP2"
+celltype <- "MEL"
+this_reQTL_matrix <- left_join(df.MEL.PBSIFNG, genotype, by="donor") %>% na.omit()
+df <- this_reQTL_matrix
+df$condition <- gsub("F.*_","",df$biosample)
+df$condition <- ordered(df$condition, levels=c("PBS","IFNG"))
+df$genotype.nt <- ordered(df$genotype.nt, 
+                       levels <- c(paste0(snp.ref,snp.ref),
+                                   paste0(snp.ref,snp.alt,"|",snp.alt,snp.ref),
+                                   paste0(snp.alt,snp.alt)))
+
+donor_counts <- df %>%
+  distinct(genotype.nt, donor) %>%
+  group_by(genotype.nt) %>%
+  summarise(n = n(), .groups = "drop")
+
+facet_labels <- setNames(
+  paste0(as.character(donor_counts$genotype.nt), " (n=", donor_counts$n, ")"),
+  donor_counts$genotype.nt
+)
+
+
+# make paired plots
+position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+line.color = "grey"; linetype = "solid"; palette="bright"
+highlightdata1 <- df %>% filter(donor=="F25")
+highlightdata2 <- df %>% filter(donor=="F49")
+highlightdata3 <- df %>% filter(donor=="F55")
+
+p <- ggplot(df, create_aes(list(x = "condition", y = "CPM"))) +
+  geom_exec(geom_line, data = df, group = "donor",
+            color = line.color, size = line.size, linetype = linetype,
+            position = position) +
+  geom_exec(geom_point, data = df, color = "condition", size = point.size,
+            position = position) +
+  scale_color_manual(values=c("#999999", "#E69F00")) +
+  geom_exec(geom_line, data = highlightdata1, group = "donor",
+            color = "blue", size = 0.7, linetype = linetype,
+            position = position) +
+  geom_exec(geom_line, data = highlightdata2, group = "donor",
+            color = "brown", size = 0.7, linetype = linetype,
+            position = position) +
+  geom_exec(geom_line, data = highlightdata3, group = "donor",
+            color = "black", size = 0.7, linetype = linetype,
+            position = position) +
+  ggtitle(paste0(celltype,"\n",this.snp,":",this.gene)) +
+  theme(legend.position="none") +
+  facet_wrap(~ genotype.nt, labeller = labeller(genotype.nt = facet_labels))
+
+
+```
+# model for IFNG eQTL
+```{r model-eQTL}
+library(MASS)
+this_matrix <- left_join(df.MEL.IFNG, genotype, by="donor") %>% na.omit
+
+# Model 1: Raw counts + Poisson + Fixed effect
+model1 <- glm(counts ~ genotype.num, data = this_matrix, family = "poisson", offset = loglibsize)
+
+# Model 2: Raw counts + Negative Binomial + Fixed effect
+# Why use: More flexible than Poisson; handles overdispersion better (variance > mean).
+# > overdispersion_ratio <- sum(residuals(model1, type="pearson")^2) / df.residual(model1)
+# > print(overdispersion_ratio)
+# [1] 35.30822 --> highly overdispersed. NB >> Poisson
+model2 <- glm.nb(counts ~ genotype.num + offset(loglibsize), data = this_matrix)
+
+# Model 3: Rank-normalized CPM + Linear + Fixed effect
+# Why use: No need to model count distributions; robust to outliers. Good for visualization too.
+model3 <- lm(rankNormCPM ~ genotype.num, data = this_matrix)
+
+### ----- is it really okay to have number of levels of each grouping factor == number of observations? model4 and 5 could work but model6 threw an error. 
+# Model 4: Raw counts + Poisson + Mixed effects (random intercept by donor)
+# Why use: Controls for donor-specific baseline expression differences.
+library(lme4)
+model4 <- glmer(counts ~ genotype.num + (1 | donor), family = poisson, data = this_matrix, offset = loglibsize)
+
+# Model 5: Raw counts + Negative Binomial + Mixed effects (random intercept)
+# Why use: Like Model 4, but handles overdispersion.
+library(glmmTMB)
+model5 <- glmmTMB(counts ~ genotype.num + (1 | donor), 
+                  family = nbinom2, data = this_matrix, offset = loglibsize)
+
+### after this point, the models don't work anymore. 
+# Model 6: Rank-normalized CPM + Linear + Mixed (random intercept)
+# Why use: Allows for subject-specific baselines without worrying about raw count assumptions.
+# If every donor appears only once (or the counts equal one another), lme4 can’t estimate a donor‑level variance component
+this_matrix$donor <- as.factor(this_matrix$donor)
+model6 <- lmer(rankNormCPM ~ genotype.num + (1 | donor), data = this_matrix)
+summary(model6)
+
+# Model 7: Raw counts + Poisson + Mixed (random intercept & slope for donor)
+# Why use: Donor response to treatment may vary — captures this heterogeneity.
+model7 <- glmer(counts ~ genotype.num + IFNg_treatment + genotype:IFNg_treatment + 
+                  (1 + IFNg_treatment | donor), 
+                family = poisson, data = df, offset = log_libsize)
+summary(model7)
+
+# Model 8: Raw counts + Negative Binomial + Mixed (RI + RS)
+# Why use: Best model for real-life complexity: donor-specific intercepts and slopes + count overdispersion.
+model8 <- glmmTMB(counts ~ genotype + IFNg_treatment + genotype:IFNg_treatment + 
+                    (1 + IFNg_treatment | donor), 
+                  family = nbinom2, data = df, offset = log_libsize)
+summary(model8)
+
+# Model 9: Rank-normalized CPM + Linear + Mixed (RI + RS)
+# Why use: Simplified model structure, very fast, good for initial screening.
+df9 <- data.frame(expr = rank_norm_expr, genotype = genotype_vector, 
+                  donor = donor_vector, IFNg_treatment = treatment_vector)
+
+model9 <- lmer(expr ~ genotype + IFNg_treatment + genotype:IFNg_treatment + 
+                 (1 + IFNg_treatment | donor), data = df9)
+summary(model9)
+
+```
+# model for reQTL
+```{r model-reQTL}
+this_matrix <- left_join(df.MEL.PBSIFNG, genotype, by="donor") %>% na.omit
+
+# Model 1: beta comparison method: Raw counts + Poisson + Fixed effect
+# model1.p.pnorm <- 0.3244923
+library(MASS)
+model1.pbs <- glm(counts ~ genotype.num, data = this_matrix[this_matrix$condition=="PBS",], family = "poisson", offset = loglibsize)
+model1.ifng <- glm(counts ~ genotype.num, data = this_matrix[this_matrix$condition=="IFNG",], family = "poisson", offset = loglibsize)
+model1.pbs.b <- summary(model1.pbs)$coefficients["genotype.num","Estimate"]
+model1.pbs.se <- summary(model1.pbs)$coefficients["genotype.num", "Std. Error"]
+model1.ifng.b <- summary(model1.ifng)$coefficients["genotype.num","Estimate"]
+model1.ifng.se <- summary(model1.ifng)$coefficients["genotype.num", "Std. Error"]
+beta_comparison <- (model1.pbs.b - model1.ifng.b) / (sqrt((model1.pbs.se^2) + (model1.ifng.se^2)))
+model1.p.pnorm <- 2 * pmin(pnorm(beta_comparison), 1 - pnorm(beta_comparison))
+
+# Model 2: Raw counts + Negative Binomial + Fixed effect
+# Why use: More flexible than Poisson; handles overdispersion better (variance > mean).
+# model2.p.pnorm = 0.6081773
+model2 <- glm.nb(counts ~ genotype.num + offset(loglibsize), data = this_matrix)
+model2.pbs <- glm.nb(counts ~ genotype.num + offset(loglibsize), data = this_matrix[this_matrix$condition=="PBS",])
+model2.ifng <- glm.nb(counts ~ genotype.num + offset(loglibsize), data = this_matrix[this_matrix$condition=="IFNG",])
+model2.pbs.b <- summary(model2.pbs)$coefficients["genotype.num","Estimate"]
+model2.pbs.se <- summary(model2.pbs)$coefficients["genotype.num", "Std. Error"]
+model2.ifng.b <- summary(model2.ifng)$coefficients["genotype.num","Estimate"]
+model2.ifng.se <- summary(model2.ifng)$coefficients["genotype.num", "Std. Error"]
+beta_comparison <- (model2.pbs.b - model2.ifng.b) / (sqrt((model2.pbs.se^2) + (model2.ifng.se^2)))
+model2.p.pnorm <- 2 * pmin(pnorm(beta_comparison), 1 - pnorm(beta_comparison))
+
+# Model 3: Rank-normalized CPM + Linear + Fixed effect
+# Why use: No need to model count distributions; robust to outliers. Good for visualization too.
+# model3.p.pnorm = 0.243769
+model3 <- lm(rankNormCPM ~ genotype.num, data = this_matrix)
+model3.pbs <- lm(rankNormCPM ~ genotype.num, data = this_matrix[this_matrix$condition=="PBS",])
+model3.ifng <- lm(rankNormCPM ~ genotype.num, data = this_matrix[this_matrix$condition=="IFNG",])
+model3.pbs.b <- summary(model3.pbs)$coefficients["genotype.num","Estimate"]
+model3.pbs.se <- summary(model3.pbs)$coefficients["genotype.num", "Std. Error"]
+model3.ifng.b <- summary(model3.ifng)$coefficients["genotype.num","Estimate"]
+model3.ifng.se <- summary(model3.ifng)$coefficients["genotype.num", "Std. Error"]
+beta_comparison <- (model3.pbs.b - model3.ifng.b) / (sqrt((model3.pbs.se^2) + (model3.ifng.se^2)))
+model3.p.pnorm <- 2 * pmin(pnorm(beta_comparison), 1 - pnorm(beta_comparison))
+
+# Model 4: Raw counts + Poisson + Mixed effects (random intercept by donor)
+# Why use: Controls for donor-specific baseline expression differences.
+library(lme4)
+model4 <- glmer(counts ~ genotype.num + condition + genotype.num:condition + (1 | donor), 
+                     family = poisson, data = this_matrix, offset = loglibsize)
+
+# Model 5: Raw counts + Negative Binomial + Mixed effects (random intercept)
+# Why use: Like Model 4, but handles overdispersion.
+library(glmmTMB)
+model5 <- glmmTMB(counts ~ genotype.num + condition + genotype.num:condition + (1 | donor), 
+                  family = nbinom2, data = this_matrix, offset = loglibsize)
+
+# Model 6: Rank-normalized CPM + Linear + Mixed (random intercept)
+# Why use: Allows for subject-specific baselines without worrying about raw count assumptions.
+# If every donor appears only once (or the counts equal one another), lme4 can’t estimate a donor‑level variance component
+library(lmerTest)
+this_matrix$donor <- as.factor(this_matrix$donor)
+model6 <- lmer(rankNormCPM ~ genotype.num + condition + genotype.num:condition + (1 | donor), data = this_matrix)
+
+
+# Model 7: Raw counts + Poisson + Mixed (random intercept & slope for donor)
+# Why use: Donor response to treatment may vary — captures this heterogeneity.
+model7 <- glmer(counts ~ genotype.num + condition + genotype.num:condition + 
+                  (1 + condition | donor),
+                family = poisson, data = this_matrix, offset = loglibsize)
+
+# Model 8: Raw counts + Negative Binomial + Mixed (RI + RS)
+# Why use: Best model for real-life complexity: donor-specific intercepts and slopes + count overdispersion.
+model8 <- glmmTMB(counts ~ genotype.num + condition + genotype.num:condition + 
+                  (1 + condition | donor), 
+                  family = nbinom2, data = this_matrix, offset = loglibsize)
+
+# Model 9: Rank-normalized CPM + Linear + Mixed (RI + RS)
+# Why use: Simplified model structure, very fast, good for initial screening.
+model9 <- lmer(rankNormCPM ~ genotype.num + condition + genotype.num:condition + 
+                 (1 + condition | donor), data = this_matrix)
+summary(model9)
+
+# Model 10: Kruskal-Wallis rank sum test
+# p-value < 2.2e-16
+this_matrix <- this_matrix %>%
+  group_by(donor) %>%
+  mutate(delta_CPM = CPM[condition == "IFNG"] - CPM[condition == "PBS"]) %>%
+  ungroup()
+
+kruskal.test(delta_CPM ~ genotype.nt, data = this_matrix)
+
+# Model 11: beta regression on scaled delta CPM
+library(betareg)
+# Wide format for delta computation
+df_wide <- this_matrix %>%
+  dplyr::select(donor, genotype.num, genotype.nt, condition, CPM) %>%
+  tidyr::pivot_wider(names_from = condition, values_from = CPM) %>%
+  mutate(
+    delta = IFNG - PBS,
+    rel_response = (IFNG - PBS) / (PBS + 1),  # % increase over PBS baseline
+    rel_response_scaled = (rel_response - min(rel_response) + 0.001) /
+                          (max(rel_response - min(rel_response)) + 0.002)  # map to (0,1)
+  )
+model_beta <- betareg(rel_response_scaled ~ genotype.num, data = df_wide)
+summary(model_beta)
+ggplot(df_wide, aes(x = as.factor(genotype.num), y = rel_response_scaled)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, height = 0, color = "orange", alpha = 0.6) +
+  labs(x = "Genotype (0=TT, 1=TC/CT, 2=CC)", 
+       y = "Scaled IFNG response / PBS", 
+       title = "Beta regression target: Relative response to IFNG")
+
+# Model 12: beta regression on raw delta CPM
+summary(lm(delta ~ genotype.num, data = df_wide))
+ggplot(df_wide, aes(x = as.factor(genotype.num), y = rel_response)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, height = 0, color = "orange", alpha = 0.6) +
+  labs(x = "Genotype (0=TT, 1=TC/CT, 2=CC)", 
+       y = "IFNG response / PBS", 
+       title = "Beta regression target: Relative response to IFNG")
+```

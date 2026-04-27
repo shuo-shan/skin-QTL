@@ -1,0 +1,23 @@
+prefix=AGCTAG_F53_FRB_IFNG_3ctk_S1mod
+prefix=AGCTCA_F59_FRB_PBS_3ctk_S1mod
+prefix=AGCTTC_F67_FRB_IFNB_3ctk_S1mod
+prefix=AGGATC_F81_FRB_IFNB_3ctk_S1mod
+prefix=AGTGCA_F58_FRB_TNF_3ctk_S1mod
+prefix=AGTGTC_F53_FRB_IFNB_3ctk_S1mod
+prefix=CAGATC_F75_FRB_IFNB_3ctk_S1mod
+prefix=CATGAG_F72_FRB_IFNB_3ctk_S1mod
+prefix=CTCAGA_F73_FRB_PBS_3ctk_S1mod
+prefix=CTCATG_F70_FRB_PBS_3ctk_S1mod
+prefix=CTTCGA_F76_FRB_PBS_3ctk_S1mod
+prefix=GTCTAG_F72_FRB_TNF_3ctk_S1mod
+prefix=GTGACA_F78_FRB_TNF_3ctk_S1mod
+prefix=GTTGCA_F75_FRB_TNF_3ctk_S1mod
+prefix=TCACAG_F78_FRB_IFNB_3ctk_S1mod
+prefix=TCGAAG_F59_FRB_IFNG_3ctk_S1mod
+prefix=TCGACA_F67_FRB_TNF_3ctk_S1mod
+prefix=TGCAAC_F79_FRB_PBS_3ctk_S1mod
+prefix=TGCAGA_F82_FRB_PBS_3ctk_S1mod
+test=$(python3 detect_adapter.py ${prefix}.p2.fq.gz)
+
+
+

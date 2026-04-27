@@ -1,0 +1,302 @@
+---
+title: "Gene Set Enrichment Analysis"
+author: "Shuo Shan"
+date: "12/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load packages  
+```{r package, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(gridExtra)
+library(ggpubr)
+library(reshape2)
+library(plotly)
+library(RCurl)
+library(fgsea) # FastGeneSetEncirhmentAnalysis
+library(ComplexHeatmap)
+
+
+Dir="~/Downloads/nl/human/skin/eQTLs/DREG/scripts"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/GSEA_myEnvironment.RData'))
+#load(paste0(Dir,'/GSEA_myEnvironment.RData'))
+```
+
+### Load Gene Sets
+```{r gene_of_interest}
+inF="~/Downloads/nl/human/skin/eQTLs/DREG/GWAS_SNP/MEL/PBSeQTL_significant_results_0.0001_MEL.txt"
+f.master=read.table(inF,header=T)
+f=f.master
+colnames(f)[2]="SYMBOL"
+```
+  
+### GeneSetEnrichmentAnalysis  
+  
+Steps toward doing GSEA:
+1- Obtaining stats for ranking genes
+2- Creating a named vector out of the DESeq2 result
+3- Obtaining a gene set from MySigDB
+4- Doing analysis
+```{r MSigDB-gene-sets}
+# load the MSigDB gene sets into a named list
+pathways.kegg <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c2.cp.kegg.v7.5.1.symbols.gmt")
+#pathways.hallmark <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/h.all.v7.5.1.symbols.gmt")
+#pathways.allcurated <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c2.all.v7.5.1.symbols.gmt")
+#pathways.canonical <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c2.cp.v7.5.1.symbols.gmt")
+#pathways.chemical_and_genetic_perturbations <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c2.cgp.v7.5.1.symbols.gmt")
+# pathways.regulatory_target <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c3.all.v7.5.1.symbols.gmt")
+pathways.ontology <- 	gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c5.all.v7.5.1.symbols.gmt")
+#pathways.GO_BP <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c5.go.bp.v7.5.1.symbols.gmt")
+# pathways.GO_MF <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c5.go.mf.v7.5.1.symbols.gmt")
+# pathways.GO_CC <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c5.go.cc.v7.5.1.symbols.gmt")
+#pathways.immunologic_signature <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c7.all.v7.5.1.symbols.gmt")
+# pathways.celltype_signature <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c8.all.v7.5.1.symbols.gmt")
+# pathways.all <- gmtPathways("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/msigdb.v7.5.1.symbols.gmt")
+pathways <- pathways.kegg
+#MSigDBtype="kegg" # type of MSigDB gene set
+```  
+  
+```{r gsea}
+# create a named vector [ranked genes]
+ranks <- f$pval_PBSeQTL
+names(ranks) <- f$SYMBOL
+
+# run fgsea algorithm:
+# NES: enrichment score normalized to mean enrichment of random samples of the same size
+fgseaRes <- fgseaMultilevel(pathways=pathways, stats=ranks)
+View(fgseaRes %>% arrange((NES)))
+View(fgseaRes[which(fgseaRes$padj<0.05),])
+res.sig <- fgseaRes %>% arrange(padj) %>% as.matrix()
+
+write.table(res.sig,file="~/Downloads/nl/human/skin/melanocyte_chemokine/RNAseq_analysis/TGFB/result_TGFB2_DEGenes_GSEA_pathwayKEGG.txt",,col.names=TRUE,row.names=FALSE,quote=FALSE,sep="\t")
+
+View(head(fgseaRes[order(padj), ], n=10))
+View(head(fgseaRes[order(padj, abs(NES)), ], n=10))
+
+# tidy the results:
+fgseaResTidy <- fgseaRes %>% as_tibble %>%
+  arrange(desc(NES)) # order by normalized enrichement score
+
+# to see what genes are in each of these pathways:
+gene.in.pathway <- pathways %>%
+  enframe("pathway", "SYMBOL") %>%
+  unnest(cols=c(SYMBOL)) %>%
+  inner_join(f, by="SYMBOL")
+```
+   
+```{r gsea-enrichment-plot, eval=F}
+# Enrichment plot for a given pathway/gene-set
+pathway.name="KEGG_CYTOKINE_CYTOKINE_RECEPTOR_INTERACTION"
+plotEnrichment(pathway=pathways[[pathway.name]], ranks)
+
+"/pi/manuel.garber-umw/human/skin/eQTLs/literature/KEGG/kegg_hsa05218_melanoma.txt"
+```
+
+```{r fishers-exact-test-stage1}
+keggDir="~/Downloads/nl/human/skin/eQTLs/literature/KEGG"
+genes_all <- read.table("~/Downloads/nl/human/skin/eQTLs/DREG/GWAS_SNP/KRT/expressed_genes.txt",header=F) %>% pull(V1)
+genes_sig <- read.table("~/Downloads/nl/human/skin/eQTLs/DREG/GWAS_SNP/KRT/IFNeQTL_significant_results_0.0001_KRT.txt",header=T) %>% pull(GENE)
+genes_notsig <- genes_all[which(!genes_all %in% genes_sig)]
+genes_inPathway <- read.table(paste0(keggDir,"/hsa05208_KEGG-ROS.txt"),header=F)$V1 %>% as.character()
+#genes_inPathway <- read.table("~/Downloads/nl/human/skin/eQTLs/literature/Yuqing_vitiligo/KRT_Vitiligo_lesion-vs-control_DEgenes.txt",header=F)$V1 %>% as.character()
+genes_notInPathway <- genes_all[which(!genes_all %in% genes_inPathway)] %>% as.character()
+
+genes_dp <- intersect(genes_sig,genes_inPathway)
+genes_dn <- intersect(genes_notsig,genes_notInPathway)
+genes_pn <- intersect(genes_inPathway, genes_notsig)
+genes_np <- intersect(genes_notInPathway, genes_sig)
+
+df <- data.frame("inPathway" = c(length(genes_dp),length(genes_pn)), 
+                "notInPathway" = c(length(genes_np),length(genes_dn)),
+                row.names=c("sig","notsig"))
+#mosaicplot(df, color = TRUE)  
+fisher.test(df)
+```
+```{r fishers-exact-test-stage2}
+# out of all genes that are upregulated, is there enrichment in pathway?
+genes_all <- f.master %>% dplyr::filter(treatment=="TGFB1") %>% pull(gene) %>% as.character()
+genes_sig <- f.master %>% dplyr::filter(treatment=="TGFB1" & padj < 0.05 & log2FoldChange > 0) %>% pull(gene) %>% as.character()
+genes_notDE <- genes_all[which(!genes_all %in% genes_sig)] %>% as.character()
+genes_inPathway <- read.table(paste0(Dir,"/hsa04916_KEGG-melanogenesis.txt"),header=F)$V1 %>% as.character()
+genes_notInPathway <- genes_all[which(!genes_all %in% genes_inPathway)] %>% as.character()
+
+genes_dp <- intersect(genes_sig,genes_inPathway)
+genes_dn <- intersect(genes_notDE,genes_notInPathway)
+genes_pn <- intersect(genes_inPathway, genes_notDE)
+genes_np <- intersect(genes_notInPathway, genes_sig)
+
+df <- data.frame("inPathway" = c(length(genes_dp),length(genes_pn)), 
+                "notInPathway" = c(length(genes_np),length(genes_dn)),
+                row.names=c("Downregulated","notDownregulated"))
+#mosaicplot(df, color = TRUE)  
+fisher.test(df)
+#
+this.genes <- f.master %>% dplyr::filter(treatment=="TGFB2") %>% dplyr::filter(gene %in% genes_dp)
+```
+
+
+## unused
+```{r gsea-bar-plot}
+# bar plot: Normalized Enrichment Scores
+gsea_bar_plot <- function(fgseaResTidy, filtered="no", Dir, gene_of_interest, MSigDBtype) {
+# bar plot: Normalized Enrichment Scores
+fgseaResTidy$adjPvalue <- ifelse(fgseaResTidy$padj <= 0.05, "significant", "non-significant")
+  cols <- c("non-significant"="grey","significant"="red")
+  
+  if (filtered=="no") {df <- fgseaResTidy} else {df <- fgseaResTidy %>% dplyr::filter(padj<=0.05)}
+  
+  p <- df %>% 
+    ggplot(., aes(reorder(pathway, NES), NES, fill=adjPvalue)) +
+    geom_col(width=0.8) +
+    scale_fill_manual(values=cols) +
+    coord_flip() +
+    labs(x="Pathway", y="Normalized Enrichment Score",
+         title=paste0("GSEA pathways enrichment score for\n",gene_of_interest," against\n ",MSigDBtype," pathways")) + 
+    theme(plot.title = element_text(size=8),
+          axis.text.x=element_text(angle=90, vjust=0.5, hjust=1, size=10),
+          legend.position = "none")
+  
+  p.interactive <- ggplotly(p, width=1200, height=15*nrow(df))
+  htmlwidgets::saveWidget(p.interactive, paste0(Dir,"/GSEA_",gene_of_interest,"_against_",MSigDBtype,"-pathways.html"))
+}
+
+gsea_bar_plot(fgseaResTidy, filtered="no", Dir, gene_of_interest, MSigDBtype)
+
+```
+  
+```{r heatmap}
+gsea_heatmap <- function(fgseaResTidy, gene.in.pathway, f, Dir, gene_of_interest, MSigDBtype) {
+  print("compiling data...")
+  # pathways with sig enrichment score
+  sig.path <- fgseaResTidy$pathway[fgseaResTidy$padj <= 0.05]
+  sig.gen <- unique(na.omit(gene.in.pathway$SYMBOL[gene.in.pathway$pathway %in% sig.path]))
+  
+  # 
+  h.dat <- reshape2::dcast(gene.in.pathway[, c(1,2)], SYMBOL~pathway)
+  rownames(h.dat) <- h.dat$SYMBOL
+  h.dat <- h.dat[, -1]
+  h.dat <- h.dat[rownames(h.dat) %in% sig.gen, ]
+  h.dat <- h.dat[, colnames(h.dat) %in% sig.path]
+  h.dat[!is.na(h.dat)] = 1
+  h.dat[is.na(h.dat)] = 0
+  h.dat.rownames <- rownames(h.dat)
+  h.dat <- h.dat %>% mutate_if(is.character,as.numeric) %>% magrittr::set_rownames(h.dat.rownames)
+  
+  # keep those genes with 3 or more occurences in significant pathways
+  table(data.frame(rowSums(h.dat)))
+  h.dat <- h.dat[data.frame(rowSums(h.dat)) >= 3, ]
+  
+  # get DESeq2 result of the top genes 
+  topTable <- f[f$SYMBOL %in% rownames(h.dat), ]
+  rownames(topTable) <- topTable$SYMBOL
+  # match the order of rownames in toptable with that of h.dat
+  topTableAligned <- topTable[which(rownames(topTable) %in% rownames(h.dat)),]
+  topTableAligned <- topTableAligned[match(rownames(h.dat), rownames(topTableAligned)),]
+  all(rownames(topTableAligned) == rownames(h.dat))
+  print("...done, preparing to plot")
+  
+  # color bar for -log10(adjusted p-value) for sig.genes
+  dfMinusLog10FDRGenes <- data.frame(-log10(
+    topTableAligned[which(rownames(topTableAligned) %in% rownames(h.dat)), 'padj']))
+  dfMinusLog10FDRGenes[dfMinusLog10FDRGenes == 'Inf'] <- 0
+  
+  # color bar for fold changes for sigGenes
+  dfFoldChangeGenes <- data.frame(
+    topTableAligned[which(rownames(topTableAligned) %in% rownames(h.dat)), 'log2FoldChange'])
+  
+  # merge both
+  dfGeneAnno <- data.frame(dfMinusLog10FDRGenes, dfFoldChangeGenes)
+  colnames(dfGeneAnno) <- c('Gene score', 'Log2FC')
+  dfGeneAnno[,2] <- ifelse(dfGeneAnno$Log2FC > 0, 'Up-regulated',
+                           ifelse(dfGeneAnno$Log2FC < 0, 'Down-regulated', 'Unchanged'))
+  colours <- list(
+    'Log2FC' = c('Up-regulated' = 'red', 'Down-regulated' = 'blue'))
+  haGenes <- ComplexHeatmap::rowAnnotation(
+    df = dfGeneAnno,
+    col = colours,
+    width = unit(1,'cm'),
+    annotation_name_side = 'top')
+  
+  # Now a separate color bar for the GSEA enrichment padj. This will 
+  # also contain the enriched term names via annot_text()
+  
+  # colour bar for enrichment score from fgsea results
+  dfEnrichment <- fgseaRes[, c("pathway", "NES")]
+  dfEnrichment <- dfEnrichment[dfEnrichment$pathway %in% colnames(h.dat)]
+  dd <- dfEnrichment$pathway
+  dfEnrichment <- dfEnrichment[, -1]
+  rownames(dfEnrichment) <- dd
+  colnames(dfEnrichment) <- 'Normalized\n Enrichment\n Score'
+  haTerms <- ComplexHeatmap::HeatmapAnnotation(
+    df = dfEnrichment,
+    Term = anno_text(
+      colnames(h.dat),
+      rot = 45,
+      just = 'right',
+      gp = gpar(fontsize = 12)),
+    annotation_height = unit.c(unit(1, 'cm'), unit(8, 'cm')),
+    annotation_name_side = 'left')
+  
+  # now generate the heatmap
+  hmapGSEA <- Heatmap(h.dat,
+                      name = 'GSEA hallmark pathways enrichment',
+                      split = dfGeneAnno[,2],
+                      col = c('0' = 'white', '1' = 'forestgreen'),
+                      rect_gp = gpar(col = 'grey85'),
+                      cluster_rows = TRUE,
+                      show_row_dend = TRUE,
+                      row_title = 'Top Genes',
+                      row_title_side = 'left',
+                      row_title_gp = gpar(fontsize = 11, fontface = 'bold'),
+                      row_title_rot = 90,
+                      show_row_names = TRUE,
+                      row_names_gp = gpar(fontsize = 11, fontface = 'bold'),
+                      row_names_side = 'left',
+                      row_dend_width = unit(35, 'mm'),
+                      cluster_columns = TRUE,
+                      show_column_dend = TRUE,
+                      column_title = 'Enriched terms',
+                      column_title_side = 'top',
+                      column_title_gp = gpar(fontsize = 12, fontface = 'bold'),
+                      column_title_rot = 0,
+                      show_column_names = FALSE,
+                      show_heatmap_legend = FALSE,
+                      clustering_distance_columns = 'euclidean',
+                      clustering_method_columns = 'ward.D2',
+                      clustering_distance_rows = 'euclidean',
+                      clustering_method_rows = 'ward.D2',
+                      bottom_annotation = haTerms)
+  
+  # gene score: -log10(adjusted p-value) for significant genes identified by DESeq2. larger score = smaller p.adj.
+  dev.off()
+  png(paste0("GSEA_enrichment_heatmap_",gene_of_interest,"_against_",MSigDBtype,"-pathways.png"), units="in", width=20, height=0.1*nrow(h.dat), res=500)
+  draw(hmapGSEA + haGenes,
+       heatmap_legend_side = 'right',
+       annotation_legend_side = 'right')
+  dev.off()
+  print("...done! Have a great day :)")
+}
+
+gsea_heatmap(fgseaResTidy, gene.in.pathway, f, Dir, gene_of_interest, MSigDBtype)
+```
+  
+
+
+
+
+
+
+
+

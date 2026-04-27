@@ -1,0 +1,140 @@
+library(dplyr)
+library(readr)
+library(stringr)
+path.Rscript.fetch_expressed_genes="/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/fetch_expressed_genes.R"
+source(path.Rscript.fetch_expressed_genes)
+path.Rscript.fetch_DE_genes="/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/fetch_DE_genes_log2FC1_padj0.05.R"
+source(path.Rscript.fetch_DE_genes)
+path.Rscript.fetch_induced_genes="/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/fetch_induced_genes_log2FC1_padj0.05.R"
+source(path.Rscript.fetch_induced_genes)
+trans_acting_genes_file <- "/pi/manuel.garber-umw/human/skin/eQTLs/literature/trans_acting_genes/compiled_trans_acting_candidate_genes_and_category.txt"
+trans_acting_genes_table <- fread(trans_acting_genes_file) %>%
+  set_colnames(c("gene","gene_category"))
+path.Rscript.fetch_mean_CPM_of_genes="/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/fetch_mean_CPM_of_genes.R"
+source(path.Rscript.fetch_mean_CPM_of_genes)
+
+# -----------------------------
+# user settings
+# -----------------------------
+dir <- args[1]
+this_snp <- args[2]
+prefix <- args[3]
+this_celltype <- args[4] 
+this_condition <- args[5]
+
+dir <- "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL"
+this_snp <- "rs838146"
+prefix <- "rs838146"
+this_celltype <- "FRB"
+this_condition <- "TNF"
+
+fimo_file <- paste0(dir, "/fimo_output_", this_snp, ".txt")
+out_file <- paste0(dir, "/fimo_output_analysis_",prefix,"_",this_celltype,"_",this_condition,".txt")
+
+# -----------------------------
+# read FIMO comparison result
+# -----------------------------
+fimo <- read_tsv(fimo_file, show_col_types = FALSE)
+
+# -----------------------------
+# extract TF gene symbol from motif_id
+# examples:
+#   EGR1.H12CORE.0.PS.A  -> EGR1
+#   SP1.H12CORE.0.P.B    -> SP1
+# -----------------------------
+fimo2 <- fimo %>%
+  mutate(
+    TF = str_replace(motif_id, "\\.H12CORE.*$", "")
+  )
+
+# -----------------------------
+# summarize to TF level
+# one TF can have multiple motif models / rows
+# -----------------------------
+tf_summary <- fimo2 %>%
+  group_by(TF) %>%
+  summarise(
+    n_motifs = n(),
+    n_gained_in_ALT = sum(motif_change_class == "gained_in_ALT", na.rm = TRUE),
+    n_lost_in_ALT = sum(motif_change_class == "lost_in_ALT", na.rm = TRUE),
+    n_stronger_in_ALT = sum(motif_change_class == "stronger_in_ALT", na.rm = TRUE),
+    n_weaker_in_ALT = sum(motif_change_class == "weaker_in_ALT", na.rm = TRUE),
+    best_priority_abs_delta_log10p = max(priority_abs_delta_log10p, na.rm = TRUE),
+    best_abs_delta_score = max(abs(delta_score_ALT_minus_REF), na.rm = TRUE),
+    strongest_change_class = motif_change_class[which.max(replace_na(priority_abs_delta_log10p, -Inf))],
+    .groups = "drop"
+  )
+
+# if some columns are all NA for some TFs, clean up
+tf_summary <- tf_summary %>%
+  mutate(
+    best_priority_abs_delta_log10p = ifelse(is.infinite(best_priority_abs_delta_log10p), NA, best_priority_abs_delta_log10p),
+    best_abs_delta_score = ifelse(is.infinite(best_abs_delta_score), NA, best_abs_delta_score)
+  )
+
+# -----------------------------
+gene_list <- unique(tf_summary$TF)
+
+ct <- this_celltype
+cond <- this_condition
+expressed_genes <- unique(fetch_expressed_genes(ct, cond))
+meanCPM <- fetch_mean_CPM_of_genes(ct, cond) %>%
+  dplyr::filter(gene %in% gene_list)
+
+if (cond == "PBS") {
+  DE_genes <- character(0)
+  induced_genes <- character(0)
+} else {
+  DE_genes <- unique(fetch_DE_genes(ct, cond))
+  induced_genes <- unique(fetch_induced_genes(ct, cond))
+}
+
+gene_exprs_annotation <- data.frame(
+  gene = gene_list,
+  celltype = ct,
+  condition = cond,
+  is_expressed = gene_list %in% expressed_genes,
+  is_DE = if (cond == "PBS") FALSE else gene_list %in% DE_genes,
+  is_induced = if (cond == "PBS") FALSE else gene_list %in% induced_genes
+) %>%
+  left_join( . , meanCPM, by="gene")
+
+# -----------------------------
+# annotate with expression / DE / induction
+# -----------------------------
+tf_ranked <- tf_summary %>%
+  left_join(gene_exprs_annotation, by = c("TF"="gene")) %>%
+  mutate(
+    TF_family = case_when(
+      str_detect(TF, "^KLF") ~ "KLF",
+      str_detect(TF, "^SP[0-9]$") ~ "SP",
+      str_detect(TF, "^EGR") ~ "EGR",
+      str_detect(TF, "^ZNF|^ZN") ~ "Zinc_finger",
+      str_detect(TF, "^E2F") ~ "E2F",
+      TRUE ~ "Other"
+    ),
+    interesting_by_motif = case_when(
+      n_gained_in_ALT > 0 ~ TRUE,
+      n_lost_in_ALT > 0 ~ TRUE,
+      best_priority_abs_delta_log10p >= 0.5 ~ TRUE,
+      best_abs_delta_score >= 3 ~ TRUE,
+      TRUE ~ FALSE
+    ),
+    interesting_biologically = is_expressed,
+    interesting_final = interesting_by_motif & interesting_biologically
+  ) %>%
+  arrange(
+    desc(interesting_final),
+    desc(n_gained_in_ALT + n_lost_in_ALT),
+    desc(best_priority_abs_delta_log10p),
+    desc(best_abs_delta_score)
+  )
+
+# -----------------------------
+# write a full ranked table
+# -----------------------------
+tf_ranked_filtered <- tf_ranked %>%
+  dplyr::filter(interesting_final==TRUE) 
+
+fwrite(tf_ranked_filtered, file=out_file, quote=F, sep="\t")
+cat("Wrote fimo TF result to:", out_file, "\n")

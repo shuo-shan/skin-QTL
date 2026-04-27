@@ -1,0 +1,88 @@
+---
+title: "rmark_skin-eQTL_ChIPseq"
+author: "Shuo Shan"
+date: "9/7/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r package, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(DESeq2)
+library(DEXSeq)
+library(BiocParallel)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(edgeR)
+library(gridExtra)
+
+setwd("/nl/umw_manuel_garber/human/skin/eQTLs/ChIP-seq/R")
+```
+
+## H3K27ac ChIP-seq data analysis
+
+## Load in merged narrowPeak files
+```{r load}
+frb.chip.f="/nl/umw_manuel_garber/human/skin/eQTLs/ChIP-seq/DolphinNext/FRB/report5357/chip/ChIP_FRB_merged.narrowPeak"
+krt.chip.f="/nl/umw_manuel_garber/human/skin/eQTLs/ChIP-seq/DolphinNext/KRT_merged/report5430/chip/ChIP_KRT_merged.narrowPeak"
+mel.chip.f="/nl/umw_manuel_garber/human/skin/eQTLs/ChIP-seq/DolphinNext/MEL/report5356/chip/ChIP_MEL_merged.narrowPeak"
+
+# histogram of size distribution
+f=read.table(file=mel.chip.f,sep="\t",header=FALSE) %>%
+  set_colnames(c("chr","start","end","id","source")) %>%
+  mutate(size=end-start+1)
+this.title=paste0("mel.chip peaks, median size: ",as.character(median(f$size))," , count: ",as.character(length(f$size)))
+ggplot(f, aes(x=size)) +
+  geom_histogram(binwidth=50,color="darkblue", fill="lightblue") + labs(title=this.title)
+
+# Split source files by PBS and IFN. List & count how many samples has this location called a peak.
+f2=separate_rows(f,source, sep=",", convert = TRUE) %>% dplyr::filter(grepl("PBS",.$source))
+f2$source=f2$source %>% gsub("ChIP_","",.) %>% gsub("_.*","",.)
+f3=f2 %>% mutate(tempid=paste0(id,source)) %>% 
+  dplyr::distinct(tempid,.keep_all = TRUE) %>%
+  dplyr::select(-tempid) %>%
+  group_by(id) %>% 
+  summarize(PBS.samples=paste(source,collapse=","), PBS.count=length(source))
+
+f4=separate_rows(f,source, sep=",", convert = TRUE) %>% dplyr::filter(grepl("IFN",.$source))
+f4$source=f4$source %>% gsub("ChIP_","",.) %>% gsub("_.*","",.)
+f5=f4 %>% mutate(tempid=paste0(id,source)) %>% 
+  dplyr::distinct(tempid,.keep_all = TRUE) %>%
+  dplyr::select(-tempid) %>%
+  group_by(id) %>% 
+  summarize(IFN.samples=paste(source,collapse=","), IFN.count=length(source))
+
+res.df=f %>% dplyr::select(-source) %>% left_join(.,f3,by="id") %>% left_join(.,f5,by="id") %>% arrange(id)
+res.df[is.na(res.df$PBS.count),"PBS.count"] = 0
+res.df[is.na(res.df$IFN.count),"IFN.count"] = 0
+rm(f2,f3,f4,f5)
+
+# check for specificity
+res.df %>% dplyr::filter(IFN.count==0) %>% nrow() # PBS-specific peaks
+res.df %>% dplyr::filter(PBS.count==0) %>% nrow() # IFN-specific peaks
+res.df %>% dplyr::filter(PBS.count==0) %>% dplyr::filter(IFN.count==3) %>% nrow() # peaks gained after IFNg in all 3 donors
+res.df %>% dplyr::filter(IFN.count==0) %>% dplyr::filter(PBS.count==3) %>% nrow() # peaks lost after IFNg in all 3 donors
+
+# write tables to file
+write.table(res.df, file=paste0("/nl/umw_manuel_garber/human/skin/eQTLs/ChIP-seq/R","/MEL_narrowPeaks.txt"), quote=F, sep="\t", row.names=T, col.names=T)
+
+
+```
+
+
+
+
+
+
+
+
+
+

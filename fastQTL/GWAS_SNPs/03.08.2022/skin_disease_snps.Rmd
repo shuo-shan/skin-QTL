@@ -1,0 +1,175 @@
+---
+title: "skin_disease_snps"
+author: "Shuo Shan"
+date: "3/8/2022"
+output: html_document
+---
+
+Goal of this analysis:
+Categorization of skin disease GWAS SNPs. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load packages  
+```{r package, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(gridExtra)
+library(ggpubr)
+library(plotly)
+library(RCurl)
+
+
+Dir="/nl/umw_manuel_garber/human/skin/eQTLs/fastQTL/GWAS_SNPs/03.08.2022"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment.RData'))
+load(paste0(Dir,'/myEnvironment.RData'))
+```
+
+### Load SNPs
+```{r load}
+snps=read.table(paste0(Dir,"/skin_disease_gwas_snps.txt"),header=TRUE,sep="\t")
+snps$Mapped_gene=snps$Mapped_gene %>% gsub(" ","",.) %>% gsub(";",",",.) # get rid of space
+snps$risk_allele_annotation=toupper(snps$risk_allele_annotation)
+snps$risk_allele_length=nchar(snps$risk_allele_annotation)
+snps$risk_allele_length[which(snps$risk_allele_annotation=="?")]="?"
+
+snps2 <- snps[,1:2] %>% group_by(Variant) %>%
+dplyr::summarize(risk_alleles=paste(risk_allele_annotation,collapse=','))
+snps3 <- snps[,c(1,3)] %>% group_by(Variant) %>%
+dplyr::summarize(gene=paste(Mapped_gene,collapse=','))
+snps4 <- left_join(snps2,snps3,by="Variant")
+
+snps.uniq=data.frame()
+for (i in 1:nrow(snps4)) {
+  df.new=snps4[i,]
+  temp=unique(unlist(strsplit(snps4[i,]$risk_alleles,split=",")))
+  if (length(temp)>1) {
+    temp=temp %>% as.data.frame %>% dplyr::filter(.!="?") %>% as.list %>% unlist %>% paste(.,collapse=",")
+  }
+  df.new$risk_alleles=as.character(temp)
+  df.new$gene=paste(unique(unlist(strsplit(snps4[i,]$gene,split=","))),collapse=",")
+  snps.uniq=rbind(snps.uniq,df.new)
+}
+rm(snps2,snps3,snps4)
+
+
+df=as.data.frame(table(snps.uniq$risk_alleles)) %>% arrange(-Freq) %>% set_colnames(c("risk_allele","count"))
+df %>% dplyr::filter(grepl(',', risk_allele))
+df %>% dplyr::filter(!grepl(',', risk_allele))
+```
+
+### Enlist mapped genes
+```{r genes}
+# total mapped genes
+mapped_genes=unlist(strsplit(paste(snps$Mapped_gene, collapse=","),split=",")) %>% unique() %>% as.data.frame() %>% set_colnames("gene") %>% dplyr::filter(gene!="")
+write.table(mapped_genes, file=paste0(Dir,"/mapped_genes.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+# mapped genes of SNV with 1 risk allele
+snps.uniq.snv=snps.uniq %>% 
+  dplyr::filter(risk_alleles %in% c("A","T","C","G")) %>% dplyr::filter(gene!="")
+snv_mapped_genes= unlist(strsplit(paste(snps.uniq.snv$gene, collapse=","),split=",")) %>% unique() %>% as.data.frame() %>% set_colnames("gene") %>% dplyr::filter(gene!="")
+write.table(snv_mapped_genes, file=paste0(Dir,"/mapped_genes_snv_with_one_risk_allele.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+write.table(snps.uniq.snv$Variant,file=paste0(Dir,"/skin_disease_single_alt_snvs.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+write.table(snps.uniq$Variant,file=paste0(Dir,"/skin_disease_snps.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+```
+  
+### Explore mapped genes Gene Ontology
+```{r go}
+### compare GO term enrichment for those genes
+# load data (analysis.txt already manually have top few rows with comments & header removed)
+go.header <- c("GO_biological_process_complete","ref_gene_count",	"upload_gene_count",	"expected",	
+               "over_under",	"fold_enrichment",	"raw_p_value", "fdr")
+go.all <- read.table(paste0(Dir,"/GO_enrichment_all_skin_disease_GWAS_SNPs.txt"),header=TRUE,sep="\t") %>% set_colnames(go.header)
+go.filt <- read.table(paste0(Dir,"/GO_enrichment_filtered_skin_disease_GWAS_SNPs.txt"),header=TRUE,sep="\t") %>% set_colnames(go.header)
+# compare
+go.common <- inner_join(go.all,go.filt,by="GO_biological_process_complete")
+go.all.uniq <- go.all %>% dplyr::filter(!GO_biological_process_complete %in% go.common$GO_biological_process_complete)
+go.filt.uniq <- go.filt %>% dplyr::filter(!GO_biological_process_complete %in% go.common$GO_biological_process_complete)
+```
+  
+### Are these mapped genes responsive to IFNg? 
+```{r genes_ifng_response_fibroblast}
+### collection of DESeq2 results
+fname.mel="/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/melanocytes/pipeline_01122022/analysis/DESeq2_results_IFNvsPBS.txt"
+fname.frb="/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/fibroblasts/pipeline_01152022/analysis/DESeq2_results_IFNvsPBS.txt"
+fname.krt="/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/keratinocytes/pipeline_01142022/analysis/DESeq2_results_IFNvsPBS.txt"
+
+### load deseq2 result of all genes
+deseq2=read.table(fname.krt,header=TRUE)
+deseq2$mapped_gene=ifelse(deseq2$gene %in% mapped_genes$gene,"yes","no")
+deseq2$sig=ifelse(deseq2$padj<0.05,"sig","not_sig")
+deseq2$response=ifelse(abs(deseq2$log2FoldChange) > 1.5,"ifng_respnsive","unresponsive")
+deseq2$response_specific=ifelse(deseq2$log2FoldChange< (-1.5),"downregulated",
+                       ifelse(deseq2$log2FoldChange>1.5,"upregulated","unresponsive"))
+table(deseq2$mapped_gene)
+
+
+table(deseq2$mapped_gene,deseq2$sig)
+fisher.test(table(deseq2$mapped_gene,deseq2$sig))
+mosaicplot(table(deseq2$sig,deseq2$mapped_gene), 
+           main = "Mosaic plot", ylab = "GWAS SNP mapped gene",xlab = "DE gene significance by IFNg")
+
+### get confidant deseq2 results
+deseq2.sig=deseq2 %>% dplyr::filter(padj<0.05)
+
+table(deseq2.sig$mapped_gene,deseq2.sig$response)
+fisher.test(table(deseq2.sig$mapped_gene,deseq2.sig$response))
+mosaicplot(table(deseq2.sig$response,deseq2.sig$mapped_gene), 
+           main = "Mosaic plot", ylab = "GWAS SNP mapped gene",xlab = "DE gene response by IFNg")
+
+table(deseq2.sig$mapped_gene,deseq2.sig$response_specific)
+fisher.test(table(deseq2.sig$mapped_gene,deseq2.sig$response_specific))
+mosaicplot(table(deseq2.sig$response_specific,deseq2.sig$mapped_gene), 
+           main = "Mosaic plot", ylab = "GWAS SNP mapped gene",xlab = "DE gene response by IFNg")
+
+
+# down-regulated genes
+deseq2.sig %>%
+  dplyr::filter(log2FoldChange <= 0) %>%
+  group_by(mapped_gene) %>%
+  dplyr::summarize(log2FoldChange = mean(log2FoldChange, na.rm=TRUE),
+                   baseMean = mean(baseMean, na.rm=TRUE),
+                   pvalue = mean(pvalue, na.rm=TRUE),
+                   padj = mean(padj, na.rm=TRUE))
+
+# up-regulated genes
+deseq2.sig %>%
+  dplyr::filter(log2FoldChange > 0) %>%
+  group_by(mapped_gene) %>%
+  dplyr::summarize(log2FoldChange = mean(log2FoldChange, na.rm=TRUE),
+                   baseMean = mean(baseMean, na.rm=TRUE),
+                   pvalue = mean(pvalue, na.rm=TRUE),
+                   padj = mean(padj, na.rm=TRUE))
+
+### are skin disease GWAS SNP mapped genes enriched in IFNg responsive genes?
+# pull IFNg upregulated genes
+genes.up <- deseq2 %>% dplyr::filter(padj<0.05) %>% dplyr::filter(log2FoldChange>1.5) %>% pull(gene)
+# pull IFNg downregulated genes
+genes.down <- deseq2 %>% dplyr::filter(padj<0.05) %>% dplyr::filter(log2FoldChange<=1.5) %>% pull(gene)
+ggplot(deseq2, aes(x=log2FoldChange, color=mapped_gene)) +
+  geom_histogram(position="identity")
+```
+
+
+
+
+
+
+
+
+
+
+
+

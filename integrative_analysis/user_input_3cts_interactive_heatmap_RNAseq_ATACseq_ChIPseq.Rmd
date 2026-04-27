@@ -1,0 +1,1307 @@
+---
+title: "DEgenes_heatmap"
+author: "Shuo Shan"
+date: "01/05/2023"
+output: html_document
+params:
+  this.gene:
+    value: "MAFB"
+    label: "gene name"
+    input: text
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Load packages  
+```{r package, warning=FALSE, include=FALSE}
+library(dplyr)
+library(magrittr)
+library(tidyverse)
+library(gplots)
+library(ggfortify)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(ggpubr)
+library(ComplexHeatmap)
+
+Dir="~/Downloads/nl/human/skin/eQTLs/integrative_analysis"
+setwd(Dir)
+#save.image(file=paste0(Dir,"/myEnvironment.RData"))
+load(paste0(Dir,"/myEnvironment.RData"))
+```
+# Load file
+## loading ATACseq data
+```{r cov-atac, eval=FALSE, echo=FALSE, include=FALSE}
+atac_coverage_dir="~/Downloads/nl/human/skin/eQTLs/chromatin/RegulatoryElements/method3"
+# load raw coverage for enhancer and promoters
+count_cRE <- data.table::fread(paste0(atac_coverage_dir,"/merged_coverage_ATACseq_allcts_regulatory_region.bed")) %>%
+  dplyr::select(-c(chr,start,end)) %>% column_to_rownames("name")
+# CPM
+col.sum=apply(count_cRE,2,sum); 
+CPM_atac=sweep(count_cRE, 2, col.sum, `/`)*1000000
+CPM_atac <- CPM_atac[,c("F25_KRT_PBS","F49_KRT_PBS","F55_KRT_PBS",
+                        "F25_MEL_PBS","F49_MEL_PBS","F55_MEL_PBS",
+                        "F25_FRB_PBS","F49_FRB_PBS","F55_FRB_PBS",
+                        "F25_KRT_IFN","F49_KRT_IFN","F55_KRT_IFN",
+                        "F25_MEL_IFN","F49_MEL_IFN","F55_MEL_IFN",
+                        "F25_FRB_IFN","F49_FRB_IFN","F55_FRB_IFN")]
+rm(col.sum,count_cRE,atac_coverage_dir)
+```
+## loading H3K27ac ChIPseq data
+```{r cov-chip, eval=FALSE, echo=FALSE, include=FALSE}
+chip_coverage_dir="~/Downloads/nl/human/skin/eQTLs/chromatin/RegulatoryElements/method3"
+# load raw coverage for enhancer and promoters
+count_cRE <- data.table::fread(paste0(chip_coverage_dir,"/merged_coverage_ChIPseq_allcts_regulatory_region.bed")) %>%
+  dplyr::select(-c(chr,start,end)) %>% column_to_rownames("name")
+# CPM
+col.sum=apply(count_cRE,2,sum); 
+CPM_chip=sweep(count_cRE, 2, col.sum, `/`)*1000000
+CPM_chip <- CPM_chip[,c("F25_KRT_PBS","F49_KRT_PBS","F55_KRT_PBS",
+                        "F25_MEL_PBS","F49_MEL_PBS","F55_MEL_PBS",
+                        "F25_FRB_PBS","F49_FRB_PBS","F55_FRB_PBS",
+                        "F25_KRT_IFN","F49_KRT_IFN","F55_KRT_IFN",
+                        "F25_MEL_IFN","F49_MEL_IFN","F55_MEL_IFN",
+                        "F25_FRB_IFN","F49_FRB_IFN","F55_FRB_IFN")]
+rm(col.sum,count_cRE,chip_coverage_dir)
+```
+## loading RNAseq data and DESeq2 results
+```{r load-rna, eval=FALSE, echo=FALSE, include=FALSE}
+rna_dir="~/Downloads/nl/human/skin/eQTLs/RNA-Seq"
+CPM_rna=data.table::fread(paste0(rna_dir,"/CPM_3cts.txt"))
+CPM_rna = CPM_rna %>% column_to_rownames(. , var="V1")
+new_colnames=c(colnames(CPM_rna)[grepl("PBS_KRT",colnames(CPM_rna))],
+               colnames(CPM_rna)[grepl("PBS_MEL",colnames(CPM_rna))],
+               colnames(CPM_rna)[grepl("PBS_FRB",colnames(CPM_rna))],
+               colnames(CPM_rna)[grepl("IFN_KRT",colnames(CPM_rna))],
+               colnames(CPM_rna)[grepl("IFN_MEL",colnames(CPM_rna))],
+               colnames(CPM_rna)[grepl("IFN_FRB",colnames(CPM_rna))])
+CPM_rna <- CPM_rna[,new_colnames]
+
+dir.krt <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/keratinocytes/pipeline_11192022/analysis"
+dir.mel <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/melanocytes/pipeline_12022022/analysis"
+dir.frb <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/fibroblasts/pipeline_11192022/analysis"
+rna.res.krt <- read.table(paste0(dir.krt,"/DESeq2_results_IFNvsPBS.txt"),header=T,sep=" ") %>% na.omit()
+rna.res.mel <- read.table(paste0(dir.mel,"/DESeq2_results_IFNvsPBS.txt"),header=T,sep=" ") %>% na.omit()
+rna.res.frb <- read.table(paste0(dir.frb,"/DESeq2_results_IFNvsPBS.txt"),header=T,sep=" ") %>% na.omit()
+DEG <- unique(c(rna.res.krt[which(rna.res.krt$padj<0.05 & abs(rna.res.krt$log2FoldChange)>3),"gene"],
+                rna.res.mel[which(rna.res.mel$padj<0.05 & abs(rna.res.mel$log2FoldChange)>3),"gene"],
+                rna.res.frb[which(rna.res.frb$padj<0.05 & abs(rna.res.frb$log2FoldChange)>3),"gene"]))
+
+```
+## Link of gene-promoter-enhancer
+```{r link, eval=FALSE, echo=FALSE, include=FALSE}
+# link between gene-promoter and gene-enhancer
+cRE_dict_dir="~/Downloads/nl/human/skin/eQTLs/chromatin/RegulatoryElements/method3"
+link_gene_promoter=data.table::fread(paste0(cRE_dict_dir,"/dictionary_gene_promoter_links_allcts.txt")) %>%
+  set_colnames(c("gene","promoter","distance","celltype"))
+link_gene_enhancer=data.table::fread(paste0(cRE_dict_dir,"/dictionary_gene_enhancer_links_allcts.txt")) %>% 
+  set_colnames(c("gene","enhancer","distance","celltype")) 
+```
+
+# plot heatmaps
+## load rnaseq CPM for all DE genes, and corresponding ATACseq and ChIPseq CPM for their promoter and enhancers
+```{r DE_CPM, eval=FALSE, echo=FALSE, include=FALSE}
+promoter_df <- link_gene_promoter[which(gene %in% DEG),]
+enhancer_df <- link_gene_enhancer[which(gene %in% DEG),]
+
+CPM_rna_DEG <- CPM_rna[DEG,]
+CPM_atac_DEG_promoter <- CPM_atac[unique(promoter_df$promoter),]
+CPM_atac_DEG_enhancer <- CPM_atac[unique(enhancer_df$enhancer),]
+CPM_chip_DEG_promoter <- CPM_chip[unique(promoter_df$promoter),]
+CPM_chip_DEG_enhancer <- CPM_chip[unique(enhancer_df$enhancer),]
+```
+
+## find the matching enhancers for each gene and plot
+```{r plots, eval=FALSE, echo=FALSE, include=FALSE}
+plot_list = list()
+for (g in DEG.shared$gene) {
+  p <- create_compiled_heatmap(g)
+  plot_list[[i]] = p
+}
+pdf(paste0(outDir,"/compiled_heatmaps_gene_CRE_shared_DEG.pdf"),width=15,height=8)
+for (i in 1:length(plot_list)) {
+  print(plot_list[[i]])
+}
+dev.off()
+```
+## useful plotting functions
+```{r nicekmeans, echo=FALSE, include=FALSE}
+# useful function
+niceKmeans <-function (df, k, kmeans.algorithm = "Lloyd", iter.max = 1000, nstart=100) {
+  
+  result = data.frame();
+  source = t(scale(t(df)));
+  kmeans = kmeans(source, centers = k, iter.max = iter.max, algorithm=kmeans.algorithm, nstart=nstart);
+  clustered = data.frame();
+  breaks = c();
+  for (i in 1:k) {
+    print(sprintf("Doing cluster %i",i))
+    cluster = source[kmeans$cluster==i,];
+    rows = row.names(cluster);
+    clust = heatmap.2(as.matrix(cluster), distfun=function(x) as.dist((1-cor(t(x)))/2))
+    cluster.ordered = cluster[clust$rowInd,];
+    cluster.ordered.genes = rows[clust$rowInd];
+    row.names(cluster.ordered) = cluster.ordered.genes;
+    class = data.frame(row.names=cluster.ordered.genes);
+    class[,"class"] = i 
+    cluster.ordered = cbind(cluster.ordered, class);
+    clustered = rbind(clustered, cluster.ordered);
+    if(i > 1 & i < k) {
+      breaks[i] = as.numeric(breaks[i-1]) + length(rows);
+    } else if(i==1) {
+      breaks[i] = length(rows);
+    }
+  }
+  
+  result <- list();
+  result$clustered <- clustered;
+  result$breaks <- breaks;
+  return(result);
+}
+
+```
+```{r gene-enhancer-heatmap, eval=FALSE, echo=FALSE, include=FALSE}
+create_compiled_heatmap <- function(g) {
+g = "IRF7"
+this.dict.p <- link_gene_promoter[which(link_gene_promoter$gene == g),c("promoter","distance")] %>% distinct() %>% arrange(gene,distance)
+this.dict.e <- link_gene_enhancer[which(link_gene_enhancer$gene == g),c("enhancer","distance")] %>% distinct() %>% arrange(gene,distance)
+
+header <- c("F25_PBS_KRT","F49_PBS_KRT","F55_PBS_KRT",
+            "F25_PBS_MEL","F49_PBS_MEL","F55_PBS_MEL",
+            "F25_PBS_FRB","F49_PBS_FRB","F55_PBS_FRB",
+            "F25_IFN_KRT","F49_IFN_KRT","F55_IFN_KRT",
+            "F25_IFN_MEL","F49_IFN_MEL","F55_IFN_MEL",
+            "F25_IFN_FRB","F49_IFN_FRB","F55_IFN_FRB")
+this.CPM.gene <- log2(CPM_rna[g,header] + 1)
+this.CPM.atac.p <- log2(CPM_atac_DEG_promoter[unique(this.dict.p$promoter),] + 1)
+this.CPM.atac.e <- log2(CPM_atac_DEG_enhancer[unique(this.dict.e$enhancer),] + 1)
+this.CPM.chip.p <- log2(CPM_chip_DEG_promoter[unique(this.dict.p$promoter),] + 1)
+this.CPM.chip.e <- log2(CPM_chip_DEG_enhancer[unique(this.dict.e$enhancer),] + 1)
+
+CPM.gene.scaled <- t(scale(t(as.matrix(this.CPM.gene)), center = TRUE, scale = TRUE)) %>% as.data.frame()
+CPM.atac.p.scaled <- t(scale(t(as.matrix(this.CPM.atac.p)), center = TRUE, scale = TRUE)) %>% as.data.frame()
+CPM.atac.e.scaled <- t(scale(t(as.matrix(this.CPM.atac.e)), center = TRUE, scale = TRUE)) %>% as.data.frame()
+CPM.chip.p.scaled <- t(scale(t(as.matrix(this.CPM.chip.p)), center = TRUE, scale = TRUE)) %>% as.data.frame()
+CPM.chip.e.scaled <- t(scale(t(as.matrix(this.CPM.chip.e)), center = TRUE, scale = TRUE)) %>% as.data.frame()
+#CPM.atac.p.scaled <- CPM.p.scaled %>% rownames_to_column("promoter") %>% left_join( . , unique(this.dict.p[,c("name","dist")]), by="name") %>% mutate(tag=paste0(name,"_",dist)) %>% column_to_rownames("tag") %>% dplyr::select(-c("name", "dist"))
+#CPM.atac.e.scaled <- CPM.e.scaled %>% rownames_to_column("name") %>% left_join( . , unique(this.dict.e[,c("name","dist")]), by="name") %>% mutate(tag=paste0(name,"_",dist)) %>% column_to_rownames("tag") %>% dplyr::select(-c("name", "dist"))
+
+# heatmaps for gene expression, promoter and enhancer ATACseq signal.
+column_ha = HeatmapAnnotation(
+  condition = colnames(CPM.gene.scaled) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  celltype = colnames(CPM.gene.scaled) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  col = list(celltype = c("FRB" = "#97de8c", "MEL" = "#80391e", "KRT" = "#1a8bb5"),
+             condition = c("PBS" = "grey", "IFN" = "#Ec5003")),
+  show_legend = c(TRUE,TRUE))
+
+
+heatmap.gene <- Heatmap(CPM.gene.scaled, 
+        name = "gene z-log2CPM",
+        top_annotation = column_ha,
+        column_title = g,
+        column_split = rep(1:3, each = 6),
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        show_row_names = TRUE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_names_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+
+heatmap.atac.promoter <- Heatmap(CPM.atac.p.scaled, 
+        name = "z-log2CPM",
+        column_title = "ATACseq signal promoter ",
+        column_split = rep(1:3, each = 6),
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        show_row_names = TRUE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_names_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+
+heatmap.atac.enhancer <- Heatmap(CPM.atac.e.scaled, 
+        name = "enhancer z-log2CPM",
+        column_title = "ATACseq signal enhancer",
+        column_split = rep(1:3, each = 6),
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        show_row_names = TRUE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_names_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+
+heatmap.chip.promoter <- Heatmap(CPM.chip.p.scaled, 
+        name = "z-log2CPM",
+        column_title = "H3K27ac ChIPseq signal promoter ",
+        column_split = rep(1:3, each = 6),
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        show_row_names = TRUE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_names_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+
+heatmap.chip.enhancer <- Heatmap(CPM.chip.e.scaled, 
+        name = "enhancer z-log2CPM",
+        column_title = "H3K27ac ChIPseq signal enhancer",
+        column_split = rep(1:3, each = 6),
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        show_row_names = TRUE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_names_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+
+heatmaps <- heatmap.gene %v% heatmap.atac.promoter %v% heatmap.chip.promoter %v% heatmap.atac.enhancer %v% heatmap.chip.enhancer # vertically concatenating heatmaps
+return(heatmaps)
+}
+
+```
+```{r paired_plot_function, eval=FALSE, echo=FALSE, include=FALSE}
+make_paired_plot <- function(this.title,this.df) {
+  df = data.frame(CPM=as.numeric(this.df[1,]), sample=colnames(this.df)) %>%
+    separate( . , col=sample, into=c("donor","treatment","celltype")) 
+  df$treatment <- factor(df$treatment, levels = c("PBS","IFN"))
+  
+  position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+  line.color = "grey"; linetype = "solid"; palette="bright"
+  
+  highlightdata1 <- df %>% filter(donor=="F25")
+  highlightdata2 <- df %>% filter(donor=="F49")
+  highlightdata3 <- df %>% filter(donor=="F55")
+  
+  p <- ggplot(df, create_aes(list(x = "treatment", y = "CPM"))) +
+    geom_exec(geom_line, data = df, group = "donor",
+              color = line.color, size = line.size, linetype = linetype,
+              position = position) +
+    geom_exec(geom_point, data = df, color = "treatment", size = point.size,
+              position = position) +
+    scale_color_manual(values=c("#999999", "#E69F00")) +
+    geom_exec(geom_line, data = highlightdata1, group = "donor",
+              color = "blue", size = 0.7, linetype = linetype,
+              position = position) +
+    geom_exec(geom_line, data = highlightdata2, group = "donor",
+              color = "brown", size = 0.7, linetype = linetype,
+              position = position) +
+    geom_exec(geom_line, data = highlightdata3, group = "donor",
+              color = "black", size = 0.7, linetype = linetype,
+              position = position) +
+    ggtitle(this.title) +
+    theme(legend.position="none") +
+    theme(plot.title = element_text(size = 5, face = "bold")) +
+    facet_wrap(~ celltype)
+  p
+  return(p)
+}
+```
+```{r gene-enhancer-paired-plot, eval=FALSE, echo=FALSE, include=FALSE}
+create_compiled_paired_plots <- function(g) {
+this.dict.p <- link_gene_promoter[which(link_gene_promoter$gene == g),] %>% arrange(gene,dist)
+this.dict.e <- link_gene_enhancer[which(link_gene_enhancer$gene == g),] %>% arrange(gene,dist)
+
+header <- c("F25_FRB_PBS","F25_FRB_IFN","F49_FRB_PBS","F49_FRB_IFN","F55_FRB_PBS","F55_FRB_IFN",
+            "F25_MEL_PBS","F25_MEL_IFN","F49_MEL_PBS","F49_MEL_IFN","F55_MEL_PBS","F55_MEL_IFN",
+            "F25_KRT_PBS","F25_KRT_IFN","F49_KRT_PBS","F49_KRT_IFN","F55_KRT_PBS","F55_KRT_IFN")
+
+this.CPM.gene <- CPM_rna[g,header] 
+this.CPM.p <- CPM_promoter[unique(this.dict.p$name),header] %>% rownames_to_column("name") %>% left_join( . , unique(this.dict.p[,c("name","dist")]), by="name") %>% mutate(tag=paste0(name,"_",dist)) %>% column_to_rownames("tag") %>% dplyr::select(-c("name", "dist"))
+this.CPM.e <- CPM_enhancer[unique(this.dict.e$name),header] %>% rownames_to_column("name") %>% left_join( . , unique(this.dict.e[,c("name","dist")]), by="name") %>% mutate(tag=paste0(name,"_",dist)) %>% column_to_rownames("tag") %>% dplyr::select(-c("name", "dist"))
+
+this.logCPM.gene <- log2(CPM_rna[g,header] + 1)
+this.logCPM.p <- log2(CPM_promoter[unique(this.dict.p$name),header] + 1)
+this.logCPM.e <- log2(CPM_enhancer[unique(this.dict.e$name),header] + 1)
+
+CPM.gene.scaled <- t(scale(t(as.matrix(this.logCPM.gene)), center = TRUE, scale = TRUE)) %>% as.data.frame()
+CPM.p.scaled <- t(scale(t(as.matrix(this.logCPM.p)), center = TRUE, scale = TRUE)) %>% as.data.frame()
+CPM.e.scaled <- t(scale(t(as.matrix(this.logCPM.e)), center = TRUE, scale = TRUE)) %>% as.data.frame()
+
+# make paired plots
+this.CPM.all <- rbind(this.CPM.gene, this.CPM.p, this.CPM.e)
+
+paired_plot_gene <- make_paired_plot(g,this.CPM.gene)
+
+plot_list_promoter = list()
+for (i in 1:nrow(this.CPM.p)) {
+  p <- make_paired_plot(rownames(this.CPM.p)[i],this.CPM.p[i,])
+  plot_list_promoter[[i]] = p
+}
+paired_plot_promoter <- do.call("grid.arrange", c(plot_list_promoter, ncol=1, nrow=nrow(this.CPM.p)))
+
+plot_list_enhancer = list()
+for (i in 1:nrow(this.CPM.p)) {
+  p <- make_paired_plot(rownames(this.CPM.e)[i],this.CPM.e[i,])
+  plot_list_enhancer[[i]] = p
+}
+paired_plot_enhancer <- do.call("grid.arrange", c(plot_list_enhancer, ncol=1, nrow=nrow(this.CPM.p)))
+
+p <- plot_grid(paired_plot_gene, paired_plot_promoter, paired_plot_enhancer, ncol=3, nrow=1)
+return(p)
+}
+```
+
+## Compile a list of DE genes
+```{r DEG, eval=FALSE, echo=FALSE, include=FALSE}
+DEG <- unique(c(res.krt[which(res.krt$padj<0.05 & abs(res.krt$log2FoldChange)>1.5),"gene"],
+                res.mel[which(res.mel$padj<0.05 & abs(res.mel$log2FoldChange)>1.5),"gene"],
+                res.frb[which(res.frb$padj<0.05 & abs(res.frb$log2FoldChange)>1.5),"gene"]))
+```
+## select gene name
+```{r gene-select}
+g = params$this.gene
+```
+## Heatmap of RNAseq
+```{r RNA-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-1, eval=FALSE, include=FALSE}
+# 1. center and scale data
+logCPM <- log2(CPM_rna_DEG + 1)
+
+# 2. hierarchically cluster K-means clusters
+# perform k-means-clustering to determine k_row.
+#df <- logCPM
+#wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+#for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+#plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(logCPM, 7)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+                        rep(6,km_res$breaks[6]-km_res$breaks[5]),
+                        rep(7,nrow(km_res$clustered)-km_res$breaks[6]))
+
+km_res.rna <- km_res
+split_instructions.rna <- split_instructions
+```
+```{r RNA-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-2, include=FALSE}
+# 4. load genes of interest
+gene <- rownames(km_res.rna$clustered)[which(split_instructions.rna==7)]
+draw_rna_heatmap <- function(g) {
+  zlogCPM.heatmap <- km_res.rna$clustered[,1:ncol(CPM_rna_DEG)]
+  zlogCPM.heatmap_with_gene <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% gene)
+  row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_gene))
+  row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+  
+  # 5. plot heatmap
+  column_ha = HeatmapAnnotation(
+    condition = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+    celltype = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+    col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+               celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+    show_legend = c(TRUE,TRUE))
+  
+  row_ha = rowAnnotation(
+    foo = anno_mark(at = row_anno_index, 
+                    labels = row_anno_label,
+                    which="row",
+                    labels_gp = gpar(fontsize=3),
+                    padding=unit(0.5,"mm")))
+  #pdf(paste0(Dir,"/heatmap_RNAseq_DEgenes_7kmm-hc.pdf"),width=24,height=30)
+  heatmap.rna <- Heatmap(zlogCPM.heatmap, 
+                         name = "z-score log2CPM",
+                         top_annotation = column_ha,
+                         right_annotation = row_ha,
+                         column_title = "DE genes in 3 celltypes, control vs IGNg stimulated, KEGG genes labeled",
+                         cluster_columns = FALSE,
+                         cluster_rows = FALSE,
+                         column_split = c(rep(1,length(colnames(CPM_rna_DEG)[grepl("PBS_KRT",colnames(CPM_rna_DEG))])), 
+                                          rep(2,length(colnames(CPM_rna_DEG)[grepl("PBS_MEL",colnames(CPM_rna_DEG))])), 
+                                          rep(3,length(colnames(CPM_rna_DEG)[grepl("PBS_FRB",colnames(CPM_rna_DEG))])), 
+                                          rep(4,length(colnames(CPM_rna_DEG)[grepl("IFN_KRT",colnames(CPM_rna_DEG))])), 
+                                          rep(5,length(colnames(CPM_rna_DEG)[grepl("IFN_MEL",colnames(CPM_rna_DEG))])),
+                                          rep(6,length(colnames(CPM_rna_DEG)[grepl("IFN_FRB",colnames(CPM_rna_DEG))]))),
+                         row_split = split_instructions.rna, 
+                         show_row_names = FALSE,
+                         row_title_rot = 0,
+                         column_names_rot = 45,
+                         row_gap = unit(2, "mm"),
+                         border = FALSE,
+                         column_names_gp = gpar(fontsize = 5),
+                         column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                         row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+  #dev.off()
+  return(heatmap.rna)
+}
+# clean-up
+rm(logCPM, df, wss, km_res, split_instructions, zlogCPM.heatmap, zlogCPM.heatmap_with_gene_kegg, row_anno_index, row_anno_label, column_ha, row_ha)
+```
+
+## Heatmaps of ATACseq
+```{r ATAC-promoter-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-1, eval=FALSE, include=FALSE}
+# 1. center and scale data
+logCPM <- log2(CPM_atac_DEG_promoter + 1)
+
+# 2. hierarchically cluster K-means clusters
+# perform k-means-clustering to determine k_row.
+#df <- logCPM
+#wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+#for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+#lot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(logCPM, 5)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+km_res.atac.promoter <- km_res
+split_instructions.atac.promoter <- split_instructions
+```
+```{r ATAC-promoter-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-2}
+draw_atac_promoter_heatmap <- function(g) {# 4. load peaks of interest
+  peaks <- link_gene_promoter[which(link_gene_promoter$gene==g),] %>% dplyr::pull(promoter) %>% unique
+  zlogCPM.heatmap <- km_res.atac.promoter$clustered[,1:ncol(CPM_atac_DEG_promoter)]
+  zlogCPM.heatmap_with_peaks_kegg <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% peaks)
+  row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_peaks_kegg))
+  row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+  
+  # 5. plot heatmap
+  column_ha = HeatmapAnnotation(
+    condition = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+    celltype = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+    col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+               celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+  row_ha = rowAnnotation(
+    foo = anno_mark(at = row_anno_index, 
+                    labels = row_anno_label,
+                    which="row",
+                    labels_gp = gpar(fontsize=3),
+                    padding=unit(0.5,"mm")))
+  #pdf(paste0(Dir,"/heatmap_RNAseq_DEgenes_7kmm-hc.pdf"),width=24,height=30)
+  heatmap.atac.promoter <- Heatmap(zlogCPM.heatmap, 
+                                   name = "z-score log2CPM",
+                                   top_annotation = column_ha,
+                                   right_annotation = row_ha,
+                                   column_title = "ATACseq heatmap of promoters",
+                                   cluster_columns = FALSE,
+                                   cluster_rows = FALSE,
+                                   column_split = c(rep(1,9), rep(2,9)),
+                                   row_split = split_instructions.atac.promoter, 
+                                   show_row_names = FALSE,
+                                   row_title_rot = 0,
+                                   column_names_rot = 45,
+                                   row_gap = unit(2, "mm"),
+                                   border = FALSE,
+                                   column_names_gp = gpar(fontsize = 5),
+                                   column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                   row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+  #dev.off()
+  return(heatmap.atac.promoter)
+  
+  # clean-up
+  rm(logCPM, df, wss, km_res, split_instructions, zlogCPM.heatmap, zlogCPM.heatmap_with_peaks_kegg, row_anno_index, row_anno_label, column_ha, row_ha)
+}
+
+```
+```{r ATAC-enhancer-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-1, eval=FALSE, include=FALSE}
+# 1. center and scale data
+zlogCPM <- log2(CPM_atac_DEG_enhancer + 1)
+
+# 2. hierarchically cluster K-means clusters
+# perform k-means-clustering to determine k_row.
+#df <- logCPM
+#wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+#for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+#plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(logCPM, 5)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+km_res.atac.enhancer <- km_res
+split_instructions.atac.enhancer <- split_instructions
+```
+```{r ATAC-enhancer-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-2}
+draw_atac_enhancer_heatmap <- function(g){
+  # 4. load peaks of interest
+  peaks <- link_gene_enhancer[which(link_gene_enhancer$gene==g),] %>% pull(enhancer) %>% unique
+  zlogCPM.heatmap <- km_res.atac.enhancer$clustered[,1:ncol(CPM_atac_DEG_enhancer)]
+  zlogCPM.heatmap_with_peaks_kegg <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% peaks)
+  row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_peaks_kegg))
+  row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+  
+  # 5. plot heatmap
+  column_ha = HeatmapAnnotation(
+    condition = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+    celltype = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+    col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+               celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+  row_ha = rowAnnotation(
+    foo = anno_mark(at = row_anno_index, 
+                    labels = row_anno_label,
+                    which="row",
+                    labels_gp = gpar(fontsize=3),
+                    padding=unit(0.5,"mm")))
+  #pdf(paste0(Dir,"/heatmap_RNAseq_DEgenes_7kmm-hc.pdf"),width=24,height=30)
+  heatmap.atac.enhancer <- Heatmap(zlogCPM.heatmap, 
+                                   name = "z-score log2CPM",
+                                   top_annotation = column_ha,
+                                   right_annotation = row_ha,
+                                   column_title = "ATACseq heatmap of enhancers",
+                                   cluster_columns = FALSE,
+                                   cluster_rows = FALSE,
+                                   column_split = c(rep(1,9), rep(2,9)),
+                                   row_split = split_instructions.atac.enhancer, 
+                                   show_row_names = FALSE,
+                                   row_title_rot = 0,
+                                   column_names_rot = 45,
+                                   row_gap = unit(2, "mm"),
+                                   border = FALSE,
+                                   column_names_gp = gpar(fontsize = 5),
+                                   column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                   row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+  #dev.off()
+  return(heatmap.atac.enhancer)
+  
+  # clean-up
+  rm(logCPM, df, wss, km_res, split_instructions, zlogCPM.heatmap, zlogCPM.heatmap_with_peaks_kegg, row_anno_index, row_anno_label, column_ha, row_ha)
+}
+```
+
+## Heatmaps of ChIPseq
+```{r ChIP-promoter-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-1, eval=FALSE, include=FALSE}
+# 1. center and scale data
+logCPM <- log2(CPM_chip_DEG_promoter + 1)
+
+# 2. hierarchially cluster K-means clusters
+# perform k-means-clustering to determine k_row.
+#df <- logCPM
+#wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+#for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+#plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(logCPM, 5)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+km_res.chip.promoter <- km_res
+split_instructions.chip.promoter <- split_instructions
+```
+```{r ChIP-promoter-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-2}
+draw_chip_promoter_heatmap <- function(g){
+  # 4. load peaks of interest
+  peaks <- link_gene_promoter[which(link_gene_promoter$gene==g),] %>% pull(promoter) %>% unique
+  zlogCPM.heatmap <- km_res.chip.promoter$clustered[,1:ncol(CPM_chip_DEG_promoter)]
+  zlogCPM.heatmap_with_peaks_kegg <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% peaks)
+  row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_peaks_kegg))
+  row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+  
+  # 5. plot heatmap
+  column_ha = HeatmapAnnotation(
+    condition = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+    celltype = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+    col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+               celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+  row_ha = rowAnnotation(
+    foo = anno_mark(at = row_anno_index, 
+                    labels = row_anno_label,
+                    which="row",
+                    labels_gp = gpar(fontsize=3),
+                    padding=unit(0.5,"mm")))
+  #pdf(paste0(Dir,"/heatmap_RNAseq_DEgenes_7kmm-hc.pdf"),width=24,height=30)
+  heatmap.chip.promoter <- Heatmap(zlogCPM.heatmap, 
+                                   name = "z-score log2CPM",
+                                   top_annotation = column_ha,
+                                   right_annotation = row_ha,
+                                   column_title = "H3K27ac ChIPseq heatmap of promoters",
+                                   cluster_columns = FALSE,
+                                   cluster_rows = FALSE,
+                                   column_split = c(rep(1,9), rep(2,9)),
+                                   row_split = split_instructions.chip.promoter, 
+                                   show_row_names = FALSE,
+                                   row_title_rot = 0,
+                                   column_names_rot = 45,
+                                   row_gap = unit(2, "mm"),
+                                   border = FALSE,
+                                   column_names_gp = gpar(fontsize = 5),
+                                   column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                   row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+  #dev.off()
+  return(heatmap.chip.promoter)
+  
+  # clean-up
+  rm(logCPM, df, wss, km_res, split_instructions, zlogCPM.heatmap, zlogCPM.heatmap_with_peaks_kegg, row_anno_index, row_anno_label, column_ha, row_ha)
+}
+```
+```{r chip-enhancer-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-1, eval=FALSE, include=FALSE}
+# 1. center and scale data
+logCPM <- log2(CPM_chip_DEG_enhancer + 1)
+
+# 2. hierarchially cluster K-means clusters
+# perform k-means-clustering to determine k_row.
+#df <- logCPM
+#wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+#for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+#plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(logCPM, 5)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+km_res.chip.enhancer <- km_res
+split_instructions.chip.enhancer <- split_instructions
+```
+```{r chip-enhancer-heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust-2}
+draw_chip_enhancer_heatmap <- function(g){
+  # 4. load peaks of interest
+  peaks <- link_gene_enhancer[which(link_gene_enhancer$gene==g),] %>% pull(enhancer) %>% unique
+  zlogCPM.heatmap <- km_res.chip.enhancer$clustered[,1:ncol(CPM_chip_DEG_enhancer)]
+  zlogCPM.heatmap_with_peaks_kegg <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% peaks)
+  row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_peaks_kegg))
+  row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+  
+  # 5. plot heatmap
+  column_ha = HeatmapAnnotation(
+    condition = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+    celltype = colnames(zlogCPM.heatmap) %>% 
+      lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+    col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+               celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+  row_ha = rowAnnotation(
+    foo = anno_mark(at = row_anno_index, 
+                    labels = row_anno_label,
+                    which="row",
+                    labels_gp = gpar(fontsize=3),
+                    padding=unit(0.5,"mm")))
+  #pdf(paste0(Dir,"/heatmap_RNAseq_DEgenes_7kmm-hc.pdf"),width=24,height=30)
+  heatmap.chip.enhancer <- Heatmap(zlogCPM.heatmap, 
+                                   name = "z-score log2CPM",
+                                   top_annotation = column_ha,
+                                   right_annotation = row_ha,
+                                   column_title = "chipseq heatmap of enhancers",
+                                   cluster_columns = FALSE,
+                                   cluster_rows = FALSE,
+                                   column_split = c(rep(1,9), rep(2,9)),
+                                   row_split = split_instructions.chip.enhancer, 
+                                   show_row_names = FALSE,
+                                   row_title_rot = 0,
+                                   column_names_rot = 45,
+                                   row_gap = unit(2, "mm"),
+                                   border = FALSE,
+                                   column_names_gp = gpar(fontsize = 5),
+                                   column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                   row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+  #dev.off()
+  return(heatmap.chip.enhancer)
+  
+  # clean-up
+  rm(logCPM, df, wss, km_res, split_instructions, zlogCPM.heatmap, zlogCPM.heatmap_with_peaks_kegg, row_anno_index, row_anno_label, column_ha, row_ha)
+}
+```
+
+## PLOT
+```{r plot}
+p1 <- draw_rna_heatmap(gene)
+p2 <- draw_atac_promoter_heatmap(gene)
+p3 <- draw_atac_enhancer_heatmap(gene)
+p4 <- draw_chip_promoter_heatmap(gene)
+p5 <- draw_chip_enhancer_heatmap(gene)
+
+p.promoter <- p2 %v% p4
+p.enhancer <- p3 %v% p5
+
+grid.newpage()
+pushViewport(viewport(x = 0, width = 0.5, just = "left"))
+grid.rect(gp = gpar(fill = "#FF000020"))
+draw(p1, newpage = FALSE)
+popViewport()
+
+pushViewport(viewport(x = 0.5, y = 1, width = 0.5, height = 0.5, just = c("left", "top")))
+grid.rect(gp = gpar(fill = "#00FF0020"))
+draw(p.promoter, newpage = FALSE)
+popViewport()
+
+pushViewport(viewport(x = 0.5, y = 0.5, width = 0.5, height = 0.5, just = c("left", "top")))
+grid.rect(gp = gpar(fill = "#0000FF20"))
+draw(p.enhancer, newpage = FALSE)
+popViewport()
+```
+# For genes that are up/down-regulated in all 3cts, are their enhancers shared across celltypes?
+## For commonly regulated genes, check if their enhancers are shared across celltypes in ATACseq
+```{r gene-enhancer-sharing-atac}
+# to view which genes belong to clsuter of (commonly up-regulated genes)
+commonly_induced_genes <- rownames(km_res.rna$clustered)[which(split_instructions.rna==6)]
+gene <- commonly_induced_genes[2]
+make_paired_plot(gene,CPM_rna_DEG[gene,])
+
+# get the enhancers of these genes
+enhancer_of_gene_group1 <- link_gene_enhancer %>% dplyr::filter(gene %in% commonly_induced_genes) %>% arrange(gene) %>% pull(enhancer) %>% unique
+
+# prepare data to plot the ATACseq heatmap of the enhancers
+zlogCPM <- t(scale(t(log2(CPM_atac_DEG_enhancer[enhancer_of_gene_group1,] + 1))))
+
+# # cluster the enhancers
+# km_res <- niceKmeans(zlogCPM, 7)
+# split_instructions <- c(rep(1,km_res$breaks[1]), 
+#                         rep(2,km_res$breaks[2]-km_res$breaks[1]),
+#                         rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                         rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                         rep(5,km_res$breaks[5]-km_res$breaks[4]),
+#                         rep(6,km_res$breaks[6]-km_res$breaks[5]),
+#                         rep(7,nrow(km_res$clustered)-km_res$breaks[6]))
+# km_res.atac.enhancer <- km_res
+# split_instructions.atac.enhancer <- split_instructions
+
+# plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+
+heatmap.atac.enhancer <- Heatmap(zlogCPM, 
+                                 name = "z-score log2CPM",
+                                 row_km = 7,
+                                 top_annotation = column_ha,
+                                 column_title = "ATACseq heatmap of enhancers of commonly induced genes",
+                                 cluster_columns = FALSE,
+                                 cluster_rows = TRUE,
+                                 column_split = c(rep(1,9), rep(2,9)),
+                                 show_row_names = FALSE,
+                                 row_title_rot = 0,
+                                 column_names_rot = 45,
+                                 row_gap = unit(2, "mm"),
+                                 border = FALSE,
+                                 column_names_gp = gpar(fontsize = 5),
+                                 column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                 row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+ht = draw(heatmap.atac.enhancer); enhancer_clusters = row_order(ht) # this ensures the cluster info doesn't change every time I execute this line of code.
+
+# pick the commonly open enhancers of commonly induced genes
+enhancers_shared <- rownames(zlogCPM)[sort(row_order(ht)$`5`)]
+enhancers_cts <- rownames(zlogCPM)[sort(c(row_order(ht)$`2`,row_order(ht)$`4`,row_order(ht)$`7`))]
+enhancers_paired <- rownames(zlogCPM)[sort(c(row_order(ht)$`1`,row_order(ht)$`3`,row_order(ht)$`6`))]
+
+df1 <- link_gene_enhancer %>% dplyr::filter(enhancer %in% enhancers_shared) %>% mutate(pattern="shared")
+df2 <- link_gene_enhancer %>% dplyr::filter(enhancer %in% enhancers_cts) %>% mutate(pattern="cts")
+df3 <- link_gene_enhancer %>% dplyr::filter(enhancer %in% enhancers_paired) %>% mutate(pattern="paired")
+df <- rbind(df1,df2,df3)
+
+ggplot(df , aes(x=pattern, y=distance)) +
+  geom_violin() +
+  geom_boxplot(width=0.1)
+```
+```{r gene-promoter-sharing-atac}
+# to view which genes belong to clsuter of (commonly up-regulated genes)
+commonly_induced_genes <- rownames(km_res.rna$clustered)[which(split_instructions.rna==6)]
+
+# get the enhancers of these genes
+promoter_of_gene_group1 <- link_gene_promoter %>% dplyr::filter(gene %in% commonly_induced_genes) %>% arrange(gene) %>% pull(promoter) %>% unique
+
+# prepare data to plot the ATACseq heatmap of the enhancers
+zlogCPM <- t(scale(t(log2(CPM_atac_DEG_promoter[promoter_of_gene_group1,] + 1))))
+
+# plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+
+heatmap.atac.promoter <- Heatmap(zlogCPM, 
+                                 name = "z-score log2CPM",
+                                 row_km = 7,
+                                 top_annotation = column_ha,
+                                 column_title = "ATACseq heatmap of promoters of commonly induced genes",
+                                 cluster_columns = FALSE,
+                                 cluster_rows = TRUE,
+                                 column_split = c(rep(1,9), rep(2,9)),
+                                 show_row_names = FALSE,
+                                 row_title_rot = 0,
+                                 column_names_rot = 45,
+                                 row_gap = unit(2, "mm"),
+                                 border = FALSE,
+                                 column_names_gp = gpar(fontsize = 5),
+                                 column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                 row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+ht = draw(heatmap.atac.promoter); promoter_clusters = row_order(ht) # this ensures the cluster info doesn't change every time I execute this line of code.
+
+# plot the distance of common promoters and cts promoters
+# pick the commonly open enhancers of commonly induced genes
+promoters_shared <- rownames(zlogCPM)[sort(c(row_order(ht)$`3`))]
+promoters_cts <- rownames(zlogCPM)[sort(c(row_order(ht)$`4`,row_order(ht)$`6`))]
+
+df1 <- link_gene_promoter %>% dplyr::filter(promoter %in% promoters_shared) %>% mutate(pattern="shared")
+df2 <- link_gene_promoter %>% dplyr::filter(promoter %in% promoters_cts) %>% mutate(pattern="cts")
+df <- rbind(df1,df2)
+
+ggplot(df , aes(x=pattern, y=distance)) +
+  geom_violin() +
+  geom_boxplot(width=0.1)
+
+# Could the cell-type specific promoters come from genes with multiple promoters?
+genes_of_df1 <- link_gene_promoter %>% dplyr::filter(gene %in% df1$gene) %>% arrange(gene,promoter) %>% 
+  dplyr::filter(celltype=="KRT") %>% dplyr::select(c("gene","promoter")) %>% 
+  group_by(gene) %>% mutate(count = n()) %>% dplyr::select(c("gene","count")) %>%
+  distinct(gene,.keep_all=TRUE) %>% mutate(pattern="common")
+genes_of_df2 <- link_gene_promoter %>% dplyr::filter(gene %in% df2$gene) %>% arrange(gene,promoter) %>% 
+  dplyr::filter(celltype=="KRT") %>% dplyr::select(c("gene","promoter")) %>% 
+  group_by(gene) %>% mutate(count = n()) %>% dplyr::select(c("gene","count")) %>%
+  distinct(gene,.keep_all=TRUE) %>% mutate(pattern="cts")
+
+df <- rbind(genes_of_df1, genes_of_df2)
+
+get_box_stats <- function(y, upper_limit = max(df$count) * 1.15) {
+  return(data.frame(
+    y = 0.95 * upper_limit,
+    label = paste(
+      "Count =", length(y), "\n",
+      "Mean =", round(mean(y), 2), "\n",
+      "Median =", round(median(y), 2), "\n"
+    )
+  ))
+}
+ggplot(df, aes(x=pattern, y=count)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  stat_summary(fun.data = get_box_stats, geom="text", hjust=0.5, vjust=0.8)
+```
+## For commonly regulated genes, check if their enhancers are shared across celltypes in ChIPseq
+```{r gene-enhancer-sharing-chip}
+# to view which genes belong to clsuter of (commonly up-regulated genes)
+commonly_induced_genes <- rownames(km_res.rna$clustered)[which(split_instructions.rna==6)]
+
+# get the enhancers of these genes
+enhancer_of_gene_group1 <- link_gene_enhancer %>% dplyr::filter(gene %in% commonly_induced_genes) %>% arrange(gene) %>% pull(enhancer) %>% unique
+
+# prepare data to plot the ATACseq heatmap of the enhancers
+zlogCPM <- t(scale(t(log2(CPM_chip_DEG_enhancer[enhancer_of_gene_group1,] + 1))))
+
+# # cluster the enhancers
+# km_res <- niceKmeans(zlogCPM, 7)
+# split_instructions <- c(rep(1,km_res$breaks[1]), 
+#                         rep(2,km_res$breaks[2]-km_res$breaks[1]),
+#                         rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                         rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                         rep(5,km_res$breaks[5]-km_res$breaks[4]),
+#                         rep(6,km_res$breaks[6]-km_res$breaks[5]),
+#                         rep(7,nrow(km_res$clustered)-km_res$breaks[6]))
+# km_res.chip.enhancer <- km_res
+# split_instructions.chip.enhancer <- split_instructions
+
+# plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+
+heatmap.chip.enhancer <- Heatmap(zlogCPM, 
+                                 name = "z-score log2CPM",
+                                 row_km = 7,
+                                 top_annotation = column_ha,
+                                 column_title = "ChIPseq heatmap of enhancers of commonly induced genes",
+                                 cluster_columns = FALSE,
+                                 cluster_rows = TRUE,
+                                 column_split = c(rep(1,9), rep(2,9)),
+                                 show_row_names = FALSE,
+                                 row_title_rot = 0,
+                                 column_names_rot = 45,
+                                 row_gap = unit(2, "mm"),
+                                 border = FALSE,
+                                 column_names_gp = gpar(fontsize = 5),
+                                 column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                 row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+ht = draw(heatmap.chip.enhancer); enhancer_clusters = row_order(ht) # this ensures the cluster info doesn't change every time I execute this line of code.
+
+# pick the commonly open enhancers of commonly induced genes
+enhancers_shared <- rownames(zlogCPM)[sort(row_order(ht)$`5`)]
+enhancers_cts <- rownames(zlogCPM)[sort(c(row_order(ht)$`2`,row_order(ht)$`4`,row_order(ht)$`7`))]
+enhancers_paired <- rownames(zlogCPM)[sort(c(row_order(ht)$`1`,row_order(ht)$`3`,row_order(ht)$`6`))]
+
+df1 <- link_gene_enhancer %>% dplyr::filter(enhancer %in% enhancers_shared) %>% mutate(pattern="shared")
+df2 <- link_gene_enhancer %>% dplyr::filter(enhancer %in% enhancers_cts) %>% mutate(pattern="cts")
+df3 <- link_gene_enhancer %>% dplyr::filter(enhancer %in% enhancers_paired) %>% mutate(pattern="paired")
+df <- rbind(df1,df2,df3)
+
+ggplot(df , aes(x=pattern, y=distance)) +
+  geom_violin() +
+  geom_boxplot(width=0.1)
+```
+```{r gene-promoter-sharing-chip}
+# to view which genes belong to clsuter of (commonly up-regulated genes)
+commonly_induced_genes <- rownames(km_res.rna$clustered)[which(split_instructions.rna==6)]
+
+# get the enhancers of these genes
+promoter_of_gene_group1 <- link_gene_promoter %>% dplyr::filter(gene %in% commonly_induced_genes) %>% arrange(gene) %>% pull(promoter) %>% unique
+
+# prepare data to plot the ChIPseq heatmap of the enhancers
+zlogCPM <- t(scale(t(log2(CPM_chip_DEG_promoter[promoter_of_gene_group1,] + 1))))
+
+# plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+
+heatmap.chip.promoter <- Heatmap(zlogCPM, 
+                                 name = "z-score log2CPM",
+                                 row_km = 7,
+                                 top_annotation = column_ha,
+                                 column_title = "ChIPseq heatmap of promoters of commonly induced genes",
+                                 cluster_columns = FALSE,
+                                 cluster_rows = TRUE,
+                                 column_split = c(rep(1,9), rep(2,9)),
+                                 show_row_names = FALSE,
+                                 row_title_rot = 0,
+                                 column_names_rot = 45,
+                                 row_gap = unit(2, "mm"),
+                                 border = FALSE,
+                                 column_names_gp = gpar(fontsize = 5),
+                                 column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                 row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+ht = draw(heatmap.chip.promoter); promoter_clusters = row_order(ht) # this ensures the cluster info doesn't change every time I execute this line of code.
+
+# plot the distance of common promoters and cts promoters
+# pick the commonly open enhancers of commonly induced genes
+promoters_shared <- rownames(zlogCPM)[sort(c(row_order(ht)$`3`))]
+promoters_cts <- rownames(zlogCPM)[sort(c(row_order(ht)$`4`,row_order(ht)$`6`))]
+
+df1 <- link_gene_promoter %>% dplyr::filter(promoter %in% promoters_shared) %>% mutate(pattern="shared")
+df2 <- link_gene_promoter %>% dplyr::filter(promoter %in% promoters_cts) %>% mutate(pattern="cts")
+df <- rbind(df1,df2)
+
+ggplot(df , aes(x=pattern, y=distance)) +
+  geom_violin() +
+  geom_boxplot(width=0.1)
+
+# Could the cell-type specific promoters come from genes with multiple promoters?
+genes_of_df1 <- link_gene_promoter %>% dplyr::filter(gene %in% df1$gene) %>% arrange(gene,promoter) %>% 
+  dplyr::filter(celltype=="KRT") %>% dplyr::select(c("gene","promoter")) %>% 
+  group_by(gene) %>% mutate(count = n()) %>% dplyr::select(c("gene","count")) %>%
+  distinct(gene,.keep_all=TRUE) %>% mutate(pattern="common")
+genes_of_df2 <- link_gene_promoter %>% dplyr::filter(gene %in% df2$gene) %>% arrange(gene,promoter) %>% 
+  dplyr::filter(celltype=="KRT") %>% dplyr::select(c("gene","promoter")) %>% 
+  group_by(gene) %>% mutate(count = n()) %>% dplyr::select(c("gene","count")) %>%
+  distinct(gene,.keep_all=TRUE) %>% mutate(pattern="cts")
+
+df <- rbind(genes_of_df1, genes_of_df2)
+
+get_box_stats <- function(y, upper_limit = max(df$count) * 1.15) {
+  return(data.frame(
+    y = 0.95 * upper_limit,
+    label = paste(
+      "Count =", length(y), "\n",
+      "Mean =", round(mean(y), 2), "\n",
+      "Median =", round(median(y), 2), "\n"
+    )
+  ))
+}
+ggplot(df, aes(x=pattern, y=count)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  stat_summary(fun.data = get_box_stats, geom="text", hjust=0.5, vjust=0.8)
+```
+## For cell-type-specificly expressed genes, check if their enhancers are unique across celltypes in ATACseq
+```{r cts-gene-enhancer-sharing-atac}
+# to view which genes belong to clsuter of (cts-regulated genes)
+these_genes <- rownames(km_res.rna$clustered)[which(split_instructions.rna==4 | split_instructions.rna==6)]
+gene <- these_genes[200]
+make_paired_plot(gene,CPM_rna_DEG[gene,])
+
+# get the enhancers of these genes
+enhancer_of_gene_group1 <- link_gene_enhancer %>% dplyr::filter(gene %in% these_genes) %>% arrange(gene) %>% pull(enhancer) %>% unique
+
+# prepare data to plot the ATACseq heatmap of the enhancers
+zlogCPM <- t(scale(t(log2(CPM_atac_DEG_enhancer[enhancer_of_gene_group1,] + 1))))
+
+# # cluster the enhancers
+# km_res <- niceKmeans(zlogCPM, 7)
+# split_instructions <- c(rep(1,km_res$breaks[1]), 
+#                         rep(2,km_res$breaks[2]-km_res$breaks[1]),
+#                         rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                         rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                         rep(5,km_res$breaks[5]-km_res$breaks[4]),
+#                         rep(6,km_res$breaks[6]-km_res$breaks[5]),
+#                         rep(7,nrow(km_res$clustered)-km_res$breaks[6]))
+# km_res.atac.enhancer <- km_res
+# split_instructions.atac.enhancer <- split_instructions
+
+# plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+
+heatmap.atac.enhancer <- Heatmap(zlogCPM, 
+                                 name = "z-score log2CPM",
+                                 row_km = 7,
+                                 top_annotation = column_ha,
+                                 column_title = "ATACseq heatmap of enhancers of cell-type-spcificly induced genes",
+                                 cluster_columns = FALSE,
+                                 cluster_rows = TRUE,
+                                 column_split = c(rep(1,9), rep(2,9)),
+                                 show_row_names = FALSE,
+                                 row_title_rot = 0,
+                                 column_names_rot = 45,
+                                 row_gap = unit(2, "mm"),
+                                 border = FALSE,
+                                 column_names_gp = gpar(fontsize = 5),
+                                 column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                 row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+ht = draw(heatmap.atac.enhancer); enhancer_clusters = row_order(ht) # this ensures the cluster info doesn't change every time I execute this line of code.
+```
+```{r gene-promoter-sharing-atac}
+# to view which genes belong to clsuter of (commonly up-regulated genes)
+these_genes <- rownames(km_res.rna$clustered)[which(split_instructions.rna==4 | split_instructions.rna==6)]
+
+# get the enhancers of these genes
+promoter_of_gene_group1 <- link_gene_promoter %>% dplyr::filter(gene %in% these_genes) %>% arrange(gene) %>% pull(promoter) %>% unique
+
+# prepare data to plot the atacseq heatmap of the enhancers
+zlogCPM <- t(scale(t(log2(CPM_atac_DEG_promoter[promoter_of_gene_group1,] + 1))))
+
+# plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+
+heatmap.atac.promoter <- Heatmap(zlogCPM, 
+                                 name = "z-score log2CPM",
+                                 row_km = 7,
+                                 top_annotation = column_ha,
+                                 column_title = "atacseq heatmap of promoters of cell-type-specificly induced genes",
+                                 cluster_columns = FALSE,
+                                 cluster_rows = TRUE,
+                                 column_split = c(rep(1,9), rep(2,9)),
+                                 show_row_names = FALSE,
+                                 row_title_rot = 0,
+                                 column_names_rot = 45,
+                                 row_gap = unit(2, "mm"),
+                                 border = FALSE,
+                                 column_names_gp = gpar(fontsize = 5),
+                                 column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                 row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+ht = draw(heatmap.atac.promoter); promoter_clusters = row_order(ht) # this ensures the cluster info doesn't change every time I execute this line of code.
+
+# plot the distance of common promoters and cts promoters
+# pick the commonly open enhancers of commonly induced genes
+promoters_shared <- rownames(zlogCPM)[sort(c(row_order(ht)$`3`))]
+promoters_cts <- rownames(zlogCPM)[sort(c(row_order(ht)$`4`,row_order(ht)$`6`))]
+
+df1 <- link_gene_promoter %>% dplyr::filter(promoter %in% promoters_shared) %>% mutate(pattern="shared")
+df2 <- link_gene_promoter %>% dplyr::filter(promoter %in% promoters_cts) %>% mutate(pattern="cts")
+df <- rbind(df1,df2)
+
+ggplot(df , aes(x=pattern, y=distance)) +
+  geom_violin() +
+  geom_boxplot(width=0.1)
+
+# Could the cell-type specific promoters come from genes with multiple promoters?
+genes_of_df1 <- link_gene_promoter %>% dplyr::filter(gene %in% df1$gene) %>% arrange(gene,promoter) %>% 
+  dplyr::filter(celltype=="KRT") %>% dplyr::select(c("gene","promoter")) %>% 
+  group_by(gene) %>% mutate(count = n()) %>% dplyr::select(c("gene","count")) %>%
+  distinct(gene,.keep_all=TRUE) %>% mutate(pattern="common")
+genes_of_df2 <- link_gene_promoter %>% dplyr::filter(gene %in% df2$gene) %>% arrange(gene,promoter) %>% 
+  dplyr::filter(celltype=="KRT") %>% dplyr::select(c("gene","promoter")) %>% 
+  group_by(gene) %>% mutate(count = n()) %>% dplyr::select(c("gene","count")) %>%
+  distinct(gene,.keep_all=TRUE) %>% mutate(pattern="cts")
+
+df <- rbind(genes_of_df1, genes_of_df2)
+
+get_box_stats <- function(y, upper_limit = max(df$count) * 1.15) {
+  return(data.frame(
+    y = 0.95 * upper_limit,
+    label = paste(
+      "Count =", length(y), "\n",
+      "Mean =", round(mean(y), 2), "\n",
+      "Median =", round(median(y), 2), "\n"
+    )
+  ))
+}
+ggplot(df, aes(x=pattern, y=count)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  stat_summary(fun.data = get_box_stats, geom="text", hjust=0.5, vjust=0.8)
+```
+## For cell-type-specificly expressed genes, check if their enhancers are unique across celltypes in ChIPseq
+```{r cts-gene-enhancer-sharing-chip}
+# to view which genes belong to clsuter of (cts-regulated genes)
+these_genes <- rownames(km_res.rna$clustered)[which(split_instructions.rna==4 | split_instructions.rna==6)]
+
+# get the enhancers of these genes
+enhancer_of_gene_group1 <- link_gene_enhancer %>% dplyr::filter(gene %in% these_genes) %>% arrange(gene) %>% pull(enhancer) %>% unique
+
+# prepare data to plot the ATACseq heatmap of the enhancers
+zlogCPM <- t(scale(t(log2(CPM_chip_DEG_enhancer[enhancer_of_gene_group1,] + 1))))
+
+# # cluster the enhancers
+# km_res <- niceKmeans(zlogCPM, 7)
+# split_instructions <- c(rep(1,km_res$breaks[1]), 
+#                         rep(2,km_res$breaks[2]-km_res$breaks[1]),
+#                         rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                         rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                         rep(5,km_res$breaks[5]-km_res$breaks[4]),
+#                         rep(6,km_res$breaks[6]-km_res$breaks[5]),
+#                         rep(7,nrow(km_res$clustered)-km_res$breaks[6]))
+# km_res.chip.enhancer <- km_res
+# split_instructions.chip.enhancer <- split_instructions
+
+# plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+
+heatmap.chip.enhancer <- Heatmap(zlogCPM, 
+                                 name = "z-score log2CPM",
+                                 row_km = 7,
+                                 top_annotation = column_ha,
+                                 column_title = "ChIPseq heatmap of enhancers of cell-type-spcificly induced genes",
+                                 cluster_columns = FALSE,
+                                 cluster_rows = TRUE,
+                                 column_split = c(rep(1,9), rep(2,9)),
+                                 show_row_names = FALSE,
+                                 row_title_rot = 0,
+                                 column_names_rot = 45,
+                                 row_gap = unit(2, "mm"),
+                                 border = FALSE,
+                                 column_names_gp = gpar(fontsize = 5),
+                                 column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                 row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+ht = draw(heatmap.chip.enhancer); enhancer_clusters = row_order(ht) # this ensures the cluster info doesn't change every time I execute this line of code.
+```
+```{r gene-promoter-sharing-chip}
+# to view which genes belong to clsuter of (commonly up-regulated genes)
+these_genes <- rownames(km_res.rna$clustered)[which(split_instructions.rna==4 | split_instructions.rna==6)]
+
+# get the enhancers of these genes
+promoter_of_gene_group1 <- link_gene_promoter %>% dplyr::filter(gene %in% these_genes) %>% arrange(gene) %>% pull(promoter) %>% unique
+
+# prepare data to plot the ChIPseq heatmap of the enhancers
+zlogCPM <- t(scale(t(log2(CPM_chip_DEG_promoter[promoter_of_gene_group1,] + 1))))
+
+# plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = colnames(zlogCPM) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+
+heatmap.chip.promoter <- Heatmap(zlogCPM, 
+                                 name = "z-score log2CPM",
+                                 row_km = 7,
+                                 top_annotation = column_ha,
+                                 column_title = "ChIPseq heatmap of promoters of cell-type-specificly induced genes",
+                                 cluster_columns = FALSE,
+                                 cluster_rows = TRUE,
+                                 column_split = c(rep(1,9), rep(2,9)),
+                                 show_row_names = FALSE,
+                                 row_title_rot = 0,
+                                 column_names_rot = 45,
+                                 row_gap = unit(2, "mm"),
+                                 border = FALSE,
+                                 column_names_gp = gpar(fontsize = 5),
+                                 column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+                                 row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+ht = draw(heatmap.chip.promoter); promoter_clusters = row_order(ht) # this ensures the cluster info doesn't change every time I execute this line of code.
+
+# plot the distance of common promoters and cts promoters
+# pick the commonly open enhancers of commonly induced genes
+promoters_shared <- rownames(zlogCPM)[sort(c(row_order(ht)$`3`))]
+promoters_cts <- rownames(zlogCPM)[sort(c(row_order(ht)$`4`,row_order(ht)$`6`))]
+
+df1 <- link_gene_promoter %>% dplyr::filter(promoter %in% promoters_shared) %>% mutate(pattern="shared")
+df2 <- link_gene_promoter %>% dplyr::filter(promoter %in% promoters_cts) %>% mutate(pattern="cts")
+df <- rbind(df1,df2)
+
+ggplot(df , aes(x=pattern, y=distance)) +
+  geom_violin() +
+  geom_boxplot(width=0.1)
+
+# Could the cell-type specific promoters come from genes with multiple promoters?
+genes_of_df1 <- link_gene_promoter %>% dplyr::filter(gene %in% df1$gene) %>% arrange(gene,promoter) %>% 
+  dplyr::filter(celltype=="KRT") %>% dplyr::select(c("gene","promoter")) %>% 
+  group_by(gene) %>% mutate(count = n()) %>% dplyr::select(c("gene","count")) %>%
+  distinct(gene,.keep_all=TRUE) %>% mutate(pattern="common")
+genes_of_df2 <- link_gene_promoter %>% dplyr::filter(gene %in% df2$gene) %>% arrange(gene,promoter) %>% 
+  dplyr::filter(celltype=="KRT") %>% dplyr::select(c("gene","promoter")) %>% 
+  group_by(gene) %>% mutate(count = n()) %>% dplyr::select(c("gene","count")) %>%
+  distinct(gene,.keep_all=TRUE) %>% mutate(pattern="cts")
+
+df <- rbind(genes_of_df1, genes_of_df2)
+
+get_box_stats <- function(y, upper_limit = max(df$count) * 1.15) {
+  return(data.frame(
+    y = 0.95 * upper_limit,
+    label = paste(
+      "Count =", length(y), "\n",
+      "Mean =", round(mean(y), 2), "\n",
+      "Median =", round(median(y), 2), "\n"
+    )
+  ))
+}
+ggplot(df, aes(x=pattern, y=count)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  stat_summary(fun.data = get_box_stats, geom="text", hjust=0.5, vjust=0.8)
+```

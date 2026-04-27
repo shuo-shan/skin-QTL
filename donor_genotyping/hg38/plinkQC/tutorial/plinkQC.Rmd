@@ -1,0 +1,11 @@
+---
+title: "plinkQC"
+author: "Crystal Shan"
+date: "2025-07-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+

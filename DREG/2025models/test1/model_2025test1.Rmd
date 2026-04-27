@@ -1,0 +1,1804 @@
+---
+title: "skineQTL_model2025_test1"
+author: "Crystal Shan"
+date: "2025-07-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+notes:
+F78 and F138 don't have genotype data?
+# [don't run] archive code for getting ERAP2 expression for IFNG eQTL and IFNG reQTL.
+```{r archive, warning=FALSE}
+Dir="/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment_main.RData'))
+#load("/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/myEnvironment_main.RData") # raw counts, CPM, log2(CPM+1), metadata, expressed genes by ct
+
+# INT stands for rank-based inverse normal transformation
+# function
+rankNorm <- function (y) {
+  # input y: numeric vector of CPM across all genes per donor.
+  k <- 0.375 # an offset to ensure the z-score is finite. from Blom transform.
+  n <- length(y)
+  # Ranks.
+  r <- rank(y, ties.method = "average") # if same value, same rank
+  # Apply transformation.
+  r.prob <- (r - k) / (n - 2 * k + 1)
+  y.rankNorm <- stats::qnorm(r.prob) # because qnorm(1) is infinite and qnorm(-1) is -Inf
+  return(y.rankNorm)
+}
+
+metadata$biosample = paste0(metadata$donor,"_",metadata$celltype, "_", metadata$condition)
+df = data.frame(biosample=metadata$biosample, 
+                donor=metadata$donor_num,
+                counts=as.numeric(counts["ERAP2",]), 
+                CPM=as.numeric(CPM["ERAP2",]),
+                libsize=colSums(counts))
+df.MELIFNG = df[metadata$celltype=="MEL"&metadata$condition=="IFNG",]
+df.MELIFNG$rankNormCPM=rankNorm(df.MELIFNG$CPM)
+metadata.MELIFNG = metadata[metadata$celltype=="MEL"&metadata$condition=="IFNG",]
+
+df.MEL = df[metadata$celltype=="MEL"&(metadata$condition=="PBS"|metadata$condition=="IFNG"),]
+df.MEL$rankNormCPM=rankNorm(df.MEL$CPM)
+metadata.MEL = metadata[metadata$celltype=="MEL"&(metadata$condition=="PBS"|metadata$condition=="IFNG"),]
+
+outDir="/pi/manuel.garber-umw/human/skin/eQTLs/DREG/2025models/test1/"
+saveRDS(df.MELIFNG, paste0(outDir,"/ERAP_expression_MEL_IFNG.rds"))
+saveRDS(metadata.MELIFNG, paste0(outDir,"/metadata_MEL_IFNG.rds"))
+saveRDS(df.MEL, paste0(outDir,"/ERAP_expression_MEL_PBSandIFNG.rds"))
+saveRDS(metadata.MEL, paste0(outDir,"/metadata_MEL_PBSandIFNG.rds"))
+```
+# load data
+```{r load}
+library(dplyr)
+library(tidyverse)
+library(DESeq2)
+library(BiocParallel)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggpubr)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(gridExtra)
+library(lme4)
+library(lmerTest)
+library(tidyr)
+library(tibble)
+library(purrr)
+library(kableExtra)
+library(pander)
+library(emmeans)
+library(here)
+library(broom)
+library(broom.mixed)
+library(MuMIn)
+
+Dir="~/Downloads/nl/human/skin/eQTLs/DREG/2025models/test1/"
+setwd(Dir)
+load(paste0(Dir,"/QTL_model_testing1.RData"))
+
+# df.MEL.IFNG <- readRDS(paste0(Dir,"/ERAP_expression_MEL_IFNG.rds"))
+# df.MEL.IFNG$donor <- paste0("F", df.MEL.IFNG$donor)
+# df.MEL.IFNG$loglibsize <- log(df.MEL.IFNG$libsize)
+# metadata.MEL.IFNG <- readRDS(paste0(Dir,"/metadata_MEL_IFNG.rds"))
+# df.MEL.PBSIFNG <- readRDS(paste0(Dir,"/ERAP_expression_MEL_PBSandIFNG.rds"))
+# df.MEL.PBSIFNG$donor <- paste0("F", df.MEL.PBSIFNG$donor)
+# df.MEL.PBSIFNG$loglibsize <- log(df.MEL.PBSIFNG$libsize)
+# df.MEL.PBSIFNG <- df.MEL.PBSIFNG[rownames(df.MEL.PBSIFNG)!="F34_MEL_PBS_S1", ]
+# df.MEL.PBSIFNG$condition <- ordered(gsub("F.*_MEL_","", df.MEL.PBSIFNG$biosample),
+#                                     levels = c("PBS","IFNG"))
+# metadata.MEL.PBSIFNG <- readRDS(paste0(Dir,"/metadata_MEL_PBSandIFNG.rds"))
+# metadata.MEL.PBSIFNG <- metadata.MEL.PBSIFNG[metadata.MEL.PBSIFNG$sample!="F34_MEL_PBS_S1", ]
+# 
+# snpinfo <- data.table::fread(paste0(Dir,"/snp.bed")) %>% t() %>% 
+#   as.data.frame() %>% 
+#   rownames_to_column("donor") %>%
+#   set_colnames(c("donor","GT"))
+# snpinfo$donor <- gsub("skineQTL-","",snpinfo$donor)
+# REF <- "T"
+# ALT <- "C"
+# 
+# genotype <- snpinfo[7:nrow(snpinfo), ]
+# genotype <- genotype %>%
+#   mutate(
+#     genotype.num = case_when(
+#       GT == "0|0" ~ 0,
+#       GT %in% c("0|1", "1|0") ~ 1,
+#       GT == "1|1" ~ 2,
+#       TRUE ~ NA_real_
+#     ),
+#     genotype.nt = case_when(
+#       GT == "0|0" ~ "TT",
+#       GT == "0|1" ~ "TC|CT",
+#       GT == "1|0" ~ "TC|CT",
+#       GT == "1|1" ~ "CC",
+#       TRUE ~ NA_character_
+#     )
+#   )
+# genotype$donor <- sub("^F0", "F", genotype$donor)
+
+outliers_list <- c("F108_MEL","F109_MEL","F110_MEL","F111_MEL","F51_MEL","F52_MEL","F61_MEL","F118_MEL","F133_MEL","F116_MEL_IFNG","F116_MEL_IFNG","F142_MEL_TNF","F42_MEL_PBS","F34_MEL_PBS","F30_MEL_IFNG")
+lowcounts_list <- c("F116_MEL_IFNG","F142_MEL_TNF","F42_MEL_PBS","F34_MEL_PBS","F30_MEL_IFNG")
+pattern <- str_c(outliers_list, collapse = "|")
+outlier_samples_metadata.mel <- metadata.MEL.PBSIFNG %>% dplyr::filter(str_detect(sample, pattern))
+
+metadata.MEL.PBSIFNG <- metadata.MEL.PBSIFNG %>% dplyr::filter(!sample%in% outlier_samples_metadata.mel$sample)
+metadata.MEL.IFNG <- metadata.MEL.IFNG %>% dplyr::filter(!sample%in% outlier_samples_metadata.mel$sample)
+
+df.MEL.PBSIFNG <- df.MEL.PBSIFNG[metadata.MEL.PBSIFNG$sample, ]
+df.MEL.IFNG <- df.MEL.IFNG[metadata.MEL.IFNG$sample, ]
+
+rownames(df.MEL.PBSIFNG)==metadata.MEL.PBSIFNG$sample
+rownames(df.MEL.IFNG)==metadata.MEL.IFNG$sample
+
+real_dat <- left_join(df.MEL.PBSIFNG, metadata.MEL.PBSIFNG[, c("biosample","phase","sequencing_platform")], by="biosample") %>%
+  left_join(. , genotype, by="donor")
+#make sure the reference group is set to "PBS"
+real_dat$condition <- relevel(factor(as.character(real_dat$condition)), ref = "PBS")
+real_dat$genotype.nt <- relevel(factor(real_dat$genotype.nt), ref = "TT")
+real_dat$log2CPM <- log2(real_dat$CPM + 1)
+```
+# plotting
+```{r plotting-x-is-genotype}
+this.snp <- "rs2910686"
+snp.ref <- "T"
+snp.alt <- "C"
+this.gene <- "ERAP2"
+celltype <- "MEL"
+this_reQTL_matrix <- left_join(df.MEL.PBSIFNG, genotype, by="donor") %>% na.omit()
+df <- this_reQTL_matrix
+df$condition <- gsub("F.*_","",df$biosample)
+df$condition <- ordered(df$condition, levels=c("PBS","IFNG"))
+df$genotype.nt <- ordered(df$genotype.nt, 
+                       levels <- c(paste0(snp.ref,snp.ref),
+                                   paste0(snp.ref,snp.alt,"|",snp.alt,snp.ref),
+                                   paste0(snp.alt,snp.alt)))
+
+donor_counts <- df %>%
+  distinct(genotype.nt, donor) %>%
+  group_by(genotype.nt) %>%
+  summarise(n = n(), .groups = "drop")
+
+facet_labels <- setNames(
+  paste0(as.character(donor_counts$genotype.nt), " (n=", donor_counts$n, ")"),
+  donor_counts$genotype.nt
+)
+
+
+# make paired plots
+position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+line.color = "grey"; linetype = "solid"; palette="bright"
+highlightdata1 <- df %>% filter(donor=="F25")
+highlightdata2 <- df %>% filter(donor=="F49")
+highlightdata3 <- df %>% filter(donor=="F55")
+
+p <- ggplot(df, create_aes(list(x = "condition", y = "CPM"))) +
+  geom_exec(geom_line, data = df, group = "donor",
+            color = line.color, size = line.size, linetype = linetype,
+            position = position) +
+  geom_exec(geom_point, data = df, color = "condition", size = point.size,
+            position = position) +
+  scale_color_manual(values=c("#999999", "#E69F00")) +
+  geom_exec(geom_line, data = highlightdata1, group = "donor",
+            color = "blue", size = 0.7, linetype = linetype,
+            position = position) +
+  geom_exec(geom_line, data = highlightdata2, group = "donor",
+            color = "brown", size = 0.7, linetype = linetype,
+            position = position) +
+  geom_exec(geom_line, data = highlightdata3, group = "donor",
+            color = "black", size = 0.7, linetype = linetype,
+            position = position) +
+  ggtitle(paste0(celltype,"\n",this.snp,":",this.gene)) +
+  theme(legend.position="none") +
+  facet_wrap(~ genotype.nt, labeller = labeller(genotype.nt = facet_labels))
+
+
+p2 <- ggplot(df, create_aes(list(x = "condition", y = "CPM"))) +
+  geom_exec(geom_line, data = df, group = "donor",
+            color = line.color, size = line.size, linetype = linetype,
+            position = position) +
+  geom_exec(geom_point, data = df, color = "condition", size = point.size,
+            position = position) +
+  scale_color_manual(values=c("#999999", "#E69F00")) +
+  ggtitle(paste0(celltype,"\n",this.snp,":",this.gene)) +
+  theme(legend.position="none") +
+  facet_wrap(~ genotype.nt, labeller = labeller(genotype.nt = facet_labels))
+```
+```{r plotting-x-is-condition}
+# Reshape to long format for faceting
+real_dat_plot <- real_dat %>%
+  pivot_longer(cols = c(counts, CPM), names_to = "scale_type", values_to = "expression_value")
+
+# Create the plot
+ggplot(real_dat_plot, aes(x = factor(condition),
+                          y = expression_value,
+                          color = factor(genotype.num))) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(group = donor), alpha = 0.6) + 
+  labs(
+    title = "Interaction between Genotype and IFNg_treatment on Expression",
+    x = "IFNg Treatment",
+    y = "Expression Value",
+    color = "Genotype"
+  ) +
+  facet_wrap(scale_type ~ phase, scales = "free_y") +
+  theme_bw()
+```
+# model for IFNG eQTL
+```{r model-eQTL}
+library(MASS)
+this_matrix <- left_join(df.MEL.IFNG, genotype, by="donor") %>% na.omit
+
+# Model 1: Raw counts + Poisson + Fixed effect
+model1 <- glm(counts ~ genotype.num, data = this_matrix, family = "poisson", offset = loglibsize)
+
+# Model 2: Raw counts + Negative Binomial + Fixed effect
+# Why use: More flexible than Poisson; handles overdispersion better (variance > mean).
+# > overdispersion_ratio <- sum(residuals(model1, type="pearson")^2) / df.residual(model1)
+# > print(overdispersion_ratio)
+# [1] 35.30822 --> highly overdispersed. NB >> Poisson
+model2 <- glm.nb(counts ~ genotype.num + offset(loglibsize), data = this_matrix)
+
+# Model 3: Rank-normalized CPM + Linear + Fixed effect
+# Why use: No need to model count distributions; robust to outliers. Good for visualization too.
+model3 <- lm(rankNormCPM ~ genotype.num, data = this_matrix)
+
+### ----- is it really okay to have number of levels of each grouping factor == number of observations? model4 and 5 could work but model6 threw an error. 
+# Model 4: Raw counts + Poisson + Mixed effects (random intercept by donor)
+# Why use: Controls for donor-specific baseline expression differences.
+library(lme4)
+model4 <- glmer(counts ~ genotype.num + (1 | donor), family = poisson, data = this_matrix, offset = loglibsize)
+
+# Model 5: Raw counts + Negative Binomial + Mixed effects (random intercept)
+# Why use: Like Model 4, but handles overdispersion.
+library(glmmTMB)
+model5 <- glmmTMB(counts ~ genotype.num + (1 | donor), 
+                  family = nbinom2, data = this_matrix, offset = loglibsize)
+
+### after this point, the models don't work anymore. 
+# Model 6: Rank-normalized CPM + Linear + Mixed (random intercept)
+# Why use: Allows for subject-specific baselines without worrying about raw count assumptions.
+# If every donor appears only once (or the counts equal one another), lme4 can’t estimate a donor‑level variance component
+this_matrix$donor <- as.factor(this_matrix$donor)
+model6 <- lmer(rankNormCPM ~ genotype.num + (1 | donor), data = this_matrix)
+summary(model6)
+
+# Model 7: Raw counts + Poisson + Mixed (random intercept & slope for donor)
+# Why use: Donor response to treatment may vary — captures this heterogeneity.
+model7 <- glmer(counts ~ genotype.num + IFNg_treatment + genotype:IFNg_treatment + 
+                  (1 + IFNg_treatment | donor), 
+                family = poisson, data = df, offset = log_libsize)
+summary(model7)
+
+# Model 8: Raw counts + Negative Binomial + Mixed (RI + RS)
+# Why use: Best model for real-life complexity: donor-specific intercepts and slopes + count overdispersion.
+model8 <- glmmTMB(counts ~ genotype + IFNg_treatment + genotype:IFNg_treatment + 
+                    (1 + IFNg_treatment | donor), 
+                  family = nbinom2, data = df, offset = log_libsize)
+summary(model8)
+
+# Model 9: Rank-normalized CPM + Linear + Mixed (RI + RS)
+# Why use: Simplified model structure, very fast, good for initial screening.
+df9 <- data.frame(expr = rank_norm_expr, genotype = genotype_vector, 
+                  donor = donor_vector, IFNg_treatment = treatment_vector)
+
+model9 <- lmer(expr ~ genotype + IFNg_treatment + genotype:IFNg_treatment + 
+                 (1 + IFNg_treatment | donor), data = df9)
+summary(model9)
+
+```
+# model for reQTL
+```{r model-reQTL}
+this_matrix <- left_join(df.MEL.PBSIFNG, metadata.MEL.PBSIFNG[, c("biosample","phase","sequencing_platform")], by="biosample") %>%
+  left_join(. , genotype, by="donor")
+
+# Model 1: beta comparison method: Raw counts + Poisson + Fixed effect
+# model1.p.pnorm <- 0.3244923
+library(MASS)
+model1.pbs <- glm(counts ~ genotype.num, data = this_matrix[this_matrix$condition=="PBS",], family = "poisson", offset = loglibsize)
+model1.ifng <- glm(counts ~ genotype.num, data = this_matrix[this_matrix$condition=="IFNG",], family = "poisson", offset = loglibsize)
+model1.pbs.b <- summary(model1.pbs)$coefficients["genotype.num","Estimate"]
+model1.pbs.se <- summary(model1.pbs)$coefficients["genotype.num", "Std. Error"]
+model1.ifng.b <- summary(model1.ifng)$coefficients["genotype.num","Estimate"]
+model1.ifng.se <- summary(model1.ifng)$coefficients["genotype.num", "Std. Error"]
+beta_comparison <- (model1.pbs.b - model1.ifng.b) / (sqrt((model1.pbs.se^2) + (model1.ifng.se^2)))
+model1.p.pnorm <- 2 * pmin(pnorm(beta_comparison), 1 - pnorm(beta_comparison))
+
+# Model 2: Raw counts + Negative Binomial + Fixed effect
+# Why use: More flexible than Poisson; handles overdispersion better (variance > mean).
+# model2.p.pnorm = 0.6081773
+model2 <- glm.nb(counts ~ genotype.num + offset(loglibsize), data = this_matrix)
+model2.pbs <- glm.nb(counts ~ genotype.num + offset(loglibsize), data = this_matrix[this_matrix$condition=="PBS",])
+model2.ifng <- glm.nb(counts ~ genotype.num + offset(loglibsize), data = this_matrix[this_matrix$condition=="IFNG",])
+model2.pbs.b <- summary(model2.pbs)$coefficients["genotype.num","Estimate"]
+model2.pbs.se <- summary(model2.pbs)$coefficients["genotype.num", "Std. Error"]
+model2.ifng.b <- summary(model2.ifng)$coefficients["genotype.num","Estimate"]
+model2.ifng.se <- summary(model2.ifng)$coefficients["genotype.num", "Std. Error"]
+beta_comparison <- (model2.pbs.b - model2.ifng.b) / (sqrt((model2.pbs.se^2) + (model2.ifng.se^2)))
+model2.p.pnorm <- 2 * pmin(pnorm(beta_comparison), 1 - pnorm(beta_comparison))
+
+# Model 3: Rank-normalized CPM + Linear + Fixed effect
+# Why use: No need to model count distributions; robust to outliers. Good for visualization too.
+# model3.p.pnorm = 0.243769
+model3 <- lm(rankNormCPM ~ genotype.num, data = this_matrix)
+model3.pbs <- lm(rankNormCPM ~ genotype.num, data = this_matrix[this_matrix$condition=="PBS",])
+model3.ifng <- lm(rankNormCPM ~ genotype.num, data = this_matrix[this_matrix$condition=="IFNG",])
+model3.pbs.b <- summary(model3.pbs)$coefficients["genotype.num","Estimate"]
+model3.pbs.se <- summary(model3.pbs)$coefficients["genotype.num", "Std. Error"]
+model3.ifng.b <- summary(model3.ifng)$coefficients["genotype.num","Estimate"]
+model3.ifng.se <- summary(model3.ifng)$coefficients["genotype.num", "Std. Error"]
+beta_comparison <- (model3.pbs.b - model3.ifng.b) / (sqrt((model3.pbs.se^2) + (model3.ifng.se^2)))
+model3.p.pnorm <- 2 * pmin(pnorm(beta_comparison), 1 - pnorm(beta_comparison))
+
+# Model 4: Raw counts + Poisson + Mixed effects (random intercept by donor)
+# Why use: Controls for donor-specific baseline expression differences.
+library(lme4)
+model4 <- glmer(counts ~ genotype.num + condition + genotype.num:condition + (1 | donor), 
+                     family = poisson, data = this_matrix, offset = loglibsize)
+
+# Model 5: Raw counts + Negative Binomial + Mixed effects (random intercept)
+# Why use: Like Model 4, but handles overdispersion.
+library(glmmTMB)
+model5 <- glmmTMB(counts ~ genotype.num + condition + genotype.num:condition + (1 | donor), 
+                  family = nbinom2, data = this_matrix, offset = loglibsize)
+
+# Model 6: Rank-normalized CPM + Linear + Mixed (random intercept)
+# Why use: Allows for subject-specific baselines without worrying about raw count assumptions.
+# If every donor appears only once (or the counts equal one another), lme4 can’t estimate a donor‑level variance component
+library(lmerTest)
+this_matrix$donor <- as.factor(this_matrix$donor)
+model6 <- lmer(rankNormCPM ~ genotype.num + condition + genotype.num:condition + (1 | donor), data = this_matrix)
+
+
+# Model 7: Raw counts + Poisson + Mixed (random intercept & slope for donor)
+# Why use: Donor response to treatment may vary — captures this heterogeneity.
+model7 <- glmer(counts ~ genotype.num + condition + genotype.num:condition + 
+                  (1 + condition | donor),
+                family = poisson, data = this_matrix, offset = loglibsize)
+
+# Model 8: Raw counts + Negative Binomial + Mixed (RI + RS)
+# Why use: Best model for real-life complexity: donor-specific intercepts and slopes + count overdispersion.
+model8 <- glmmTMB(counts ~ genotype.num + condition + genotype.num:condition + 
+                  (1 + condition | donor), 
+                  family = nbinom2, data = this_matrix, offset = loglibsize)
+
+# Model 9: Rank-normalized CPM + Linear + Mixed (RI + RS)
+# Why use: Simplified model structure, very fast, good for initial screening.
+model9 <- lmer(rankNormCPM ~ genotype.num + condition + genotype.num:condition + 
+                 (1 + condition | donor), data = this_matrix)
+summary(model9)
+
+# Model 10: Kruskal-Wallis rank sum test
+# p-value < 2.2e-16
+this_matrix <- this_matrix %>%
+  group_by(donor) %>%
+  mutate(delta_CPM = CPM[condition == "IFNG"] - CPM[condition == "PBS"]) %>%
+  ungroup()
+
+kruskal.test(delta_CPM ~ genotype.nt, data = this_matrix)
+
+# Model 11: beta regression on scaled delta CPM
+library(betareg)
+# Wide format for delta computation
+df_wide <- this_matrix %>%
+  dplyr::select(donor, genotype.num, genotype.nt, condition, CPM) %>%
+  tidyr::pivot_wider(names_from = condition, values_from = CPM) %>%
+  mutate(
+    delta = IFNG - PBS,
+    rel_response = (IFNG - PBS) / (PBS + 1),  # % increase over PBS baseline
+    rel_response_scaled = (rel_response - min(rel_response) + 0.001) /
+                          (max(rel_response - min(rel_response)) + 0.002)  # map to (0,1)
+  )
+model_beta <- betareg(rel_response_scaled ~ genotype.num, data = df_wide)
+summary(model_beta)
+ggplot(df_wide, aes(x = as.factor(genotype.num), y = rel_response_scaled)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, height = 0, color = "orange", alpha = 0.6) +
+  labs(x = "Genotype (0=TT, 1=TC/CT, 2=CC)", 
+       y = "Scaled IFNG response / PBS", 
+       title = "Beta regression target: Relative response to IFNG")
+
+# Model 12: beta regression on raw delta CPM
+summary(lm(delta ~ genotype.num, data = df_wide))
+ggplot(df_wide, aes(x = as.factor(genotype.num), y = rel_response)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, height = 0, color = "orange", alpha = 0.6) +
+  labs(x = "Genotype (0=TT, 1=TC/CT, 2=CC)", 
+       y = "IFNG response / PBS", 
+       title = "Beta regression target: Relative response to IFNG")
+
+# Model 13: Gen suggested: linear model on CPM with random intercept for donor
+model13 <- lmerTest::lmer(CPM ~ condition * genotype.num  +
+                  (1 | donor), #random intercept for donor
+                data = this_matrix)
+summary(model13)
+tidy(model13)
+pander(broom.mixed::tidy(model13))
+# check residual normality
+plot(model13, which = 1)  # residuals vs fitted
+qqnorm(residuals(model13)); qqline(residuals(model13))  # normal Q-Q plot
+hist(residuals(model13))  # optional
+
+# Model 14: log2(CPM+1) linear model with random intercept for donor
+this_matrix$log2CPM <- log2(this_matrix$CPM + 1)
+model14 <- lmerTest::lmer(log2CPM ~ condition * genotype.num  +
+                  (1 | donor), #random intercept for donor
+                data = this_matrix)
+broom.mixed::tidy(model14)
+# check residual normality
+plot(model14, which = 1)  # residuals vs fitted
+qqnorm(residuals(model14)); qqline(residuals(model14))  # normal Q-Q plot
+hist(residuals(model14))  # optional
+```
+```{r compare-reQTL-models}
+### ------- AIC --------- ####
+AIC(model6, model13, model14)
+```
+# QQplot pval model calibration
+```{r qqplot-functions-noDonorPairRetention}
+### functions
+#function to permute outcome and record results for various model formulas
+generate_permuted_null <- function(model_formula,
+                                   data,
+                                   interaction_term_regex = ":",
+                                   permute_var = NULL,
+                                   n_perm = 100,
+                                   model_type = c("lmer", "glmer", "glmer.nb", "glm"),
+                                   family = poisson) {
+  
+  
+  model_type <- match.arg(model_type)
+  model_formula_str <- paste(deparse(model_formula), collapse = " ")
+  
+  if (is.null(permute_var)) {
+    outcome_var <- all.vars(model_formula)[1]
+  } else {
+    outcome_var <- permute_var
+  }
+  
+  # Helper to fit a model and capture warnings
+  fit_model_safely <- function(formula, data, model_type, family) {
+    warnings <- character()
+    
+    result <- withCallingHandlers(
+      tryCatch({
+        fit <- switch(
+          model_type,
+          lmer     = lmerTest::lmer(formula, data = data),
+          glmer    = glmer(formula, data = data, family = family),
+          glmer.nb = glmer.nb(formula, data = data),
+          glm      = glm(formula, data = data, family = family)
+        )
+        list(fit = fit, warnings = warnings)
+      }, error = function(e) {
+        list(fit = NULL, warnings = paste("Error:", conditionMessage(e)))
+      }),
+      warning = function(w) {
+        warnings <<- c(warnings, conditionMessage(w))
+        invokeRestart("muffleWarning")
+      }
+    )
+    
+    result$warnings <- paste(result$warnings, collapse = " | ")
+    result
+  }
+  
+  # Fit observed model
+  obs_model_result <- fit_model_safely(model_formula, data, model_type, family)
+  if (is.null(obs_model_result$fit)) return(tibble())  # skip if fail
+  
+  observed_results <- tidy(obs_model_result$fit) %>%
+    filter(str_detect(term, interaction_term_regex)) %>%
+    mutate(
+      type = "observed",
+      model_formula = model_formula_str,
+      warning = obs_model_result$warnings
+    )
+  
+  # Permuted results
+  permuted_results <- map_dfr(1:n_perm, function(i) {
+    permuted_data <- data %>%
+      mutate(!!sym(outcome_var) := sample(!!sym(outcome_var)))
+    
+    perm_model_result <- fit_model_safely(model_formula, permuted_data, model_type, family)
+    
+    if (is.null(perm_model_result$fit)) return(tibble())
+    
+    tidy(perm_model_result$fit) %>%
+      filter(str_detect(term, interaction_term_regex)) %>%
+      mutate(
+        type = "null",
+        model_formula = model_formula_str,
+        warning = perm_model_result$warnings
+      )
+  })
+  
+  bind_rows(observed_results, permuted_results)
+}
+
+
+plot_qq_pval_multi <- function(sim_df) {
+  # Load ggrepel for smart label positioning
+  library(ggrepel)
+  
+  # Ensure p-values are available and create model identifier
+  sim_df <- sim_df %>%
+    mutate(
+      model_formula_family = str_c(model_formula, " ", paste0(family), " ", paste0(model_type))
+    )
+  
+  # Calculate empirical p-values per model_formula
+  empirical_pvals <- sim_df %>%
+    group_by(model_formula_family) %>%
+    summarise(
+      observed_pval = p.value[type == "observed"],
+      null_pvals = list(p.value[type == "null"]),
+      empirical_pval = mean(null_pvals[[1]] <= observed_pval, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Prepare data for QQ plot (null points only)
+  # Convert p-values to -log10 scale for better visualization
+  qq_df <- sim_df %>%
+    filter(type == "null") %>%
+    group_by(model_formula_family) %>%
+    arrange(p.value) %>%
+    mutate(
+      neg_log10_pval = -log10(p.value),
+      expected_neg_log10 = -log10(ppoints(n(), a = 0))
+    ) %>%
+    ungroup()
+  
+  # Prepare observed points (one per model)
+  observed_points <- empirical_pvals %>%
+    mutate(
+      observed_neg_log10 = -log10(observed_pval),
+      # Expected value for the most extreme point
+      expected_neg_log10 = -log10(0.5 / lengths(null_pvals)),
+      label = paste0("p = ", signif(observed_pval, 3))
+    )
+  
+  # Plot
+  ggplot(qq_df, aes(x = expected_neg_log10, y = neg_log10_pval, color = model_formula_family)) +
+    geom_point(alpha = 0.4) +
+    geom_abline(slope = 1, intercept = 0, color = "gray") +
+    geom_point(data = observed_points, aes(x = expected_neg_log10, y = observed_neg_log10), 
+               shape = 4, size = 4, stroke = 1.5) + # "X"
+    geom_text_repel(data = observed_points, 
+                    aes(x = expected_neg_log10,
+                        y = observed_neg_log10,
+                        label = label,
+                        color = model_formula_family), 
+                    size = 3,
+                    min.segment.length = 0,  # Always draw connecting lines
+                    segment.color = "black",
+                    segment.alpha = 0.6,
+                    box.padding = 0.5,       # Space around labels
+                    point.padding = 0.3,     # Space around points
+                    force = 2,               # Repulsion strength
+                    max.overlaps = Inf) +    # Allow all labels to be shown
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+    labs(
+      x = "Expected -log10(p-value)",
+      y = "Observed -log10(p-value)",
+      color = "Model Formula",
+      title = "QQ Plot of Permuted vs Observed P-values (Multiple Models)"
+    ) +
+    theme_bw() +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "vertical"
+    )
+}
+
+```
+```{r qqplot-functions-DonorPairRetention}
+### functions
+#function to permute outcome and record results for various model formulas
+generate_permuted_null <- function(model_formula,
+                                   data,
+                                   interaction_term_regex = ":",
+                                   permute_var = NULL,
+                                   n_perm = 100,
+                                   model_type = c("lmer", "glmer", "glmer.nb", "glm"),
+                                   family = gaussian(),
+                                   id_var = "donor",             # NEW (required for donor-aware perms)
+                                   condition_var = "condition",  # NEW (for swap_within_id)
+                                   genotype_var = "genotype.num",# NEW (for permute_id_labels)
+                                   perm_scheme = c("swap_within_id","permute_id_labels","free"),
+                                   seed = NULL) {
+
+  if (!is.null(seed)) set.seed(seed)
+  model_type  <- match.arg(model_type)
+  perm_scheme <- match.arg(perm_scheme)
+  model_formula_str <- paste(deparse(model_formula), collapse = " ")
+
+  outcome_var <- if (is.null(permute_var)) all.vars(model_formula)[1] else permute_var
+
+  # ---- helper to fit model and capture warnings ----
+  fit_model_safely <- function(formula, data, model_type, family) {
+    warnings <- character()
+    result <- withCallingHandlers(
+      tryCatch({
+        fit <- switch(model_type,
+          lmer     = lmerTest::lmer(formula, data = data),
+          glmer    = lme4::glmer(formula, data = data, family = family),
+          glmer.nb = lme4::glmer.nb(formula, data = data),
+          glm      = stats::glm(formula, data = data, family = family)
+        )
+        list(fit = fit, warnings = warnings)
+      }, error = function(e) list(fit = NULL, warnings = paste("Error:", conditionMessage(e)))),
+      warning = function(w) { warnings <<- c(warnings, conditionMessage(w)); invokeRestart("muffleWarning") }
+    )
+    result$warnings <- paste(result$warnings, collapse = " | ")
+    result
+  }
+
+  # ---- observed fit ----
+  obs_model_result <- fit_model_safely(model_formula, data, model_type, family)
+  if (is.null(obs_model_result$fit)) return(tibble::tibble())
+
+  observed_results <- broom.mixed::tidy(obs_model_result$fit) %>%
+    dplyr::filter(stringr::str_detect(term, interaction_term_regex)) %>%
+    dplyr::mutate(type = "observed", model_formula = model_formula_str,
+                  warning = obs_model_result$warnings)
+
+  # ---- permutation generators ----
+  permute_once <- function(df) {
+    if (perm_scheme == "free") {
+      # (your original approach — not recommended for paired design)
+      df %>% dplyr::mutate(!!rlang::sym(outcome_var) := sample(!!rlang::sym(outcome_var)))
+    } else if (perm_scheme == "swap_within_id") {
+      # swap PBS <-> IFNG labels within donor with prob 0.5
+      # (assumes two conditions per donor)
+      levs <- levels(df[[condition_var]]) %||% unique(df[[condition_var]])
+      stopifnot(length(levs) == 2)
+      swap_levels <- function(x) ifelse(x == levs[1], levs[2], levs[1])
+
+      df %>%
+        dplyr::group_by(!!rlang::sym(id_var)) %>%
+        dplyr::mutate(.swap = rbinom(1L, 1L, 0.5),
+                      !!rlang::sym(condition_var) :=
+                        ifelse(.swap == 1L, swap_levels(!!rlang::sym(condition_var)),
+                               !!rlang::sym(condition_var))) %>%
+        dplyr::ungroup() %>%
+        dplyr::select(-.swap)
+    } else { # permute_id_labels
+      donors <- unique(df[[id_var]])
+      perm_donors <- sample(donors, length(donors), replace = FALSE)
+      map_tab <- dplyr::tibble(!!id_var := donors, .perm_id = perm_donors)
+      geno_map <- df %>%
+        dplyr::distinct(!!rlang::sym(id_var), !!rlang::sym(genotype_var)) %>%
+        dplyr::rename(.perm_id = !!rlang::sym(id_var), .perm_geno = !!rlang::sym(genotype_var))
+      df %>%
+        dplyr::left_join(map_tab, by = setNames(id_var, id_var)) %>%
+        dplyr::left_join(geno_map, by = ".perm_id") %>%
+        dplyr::mutate(!!rlang::sym(genotype_var) := .perm_geno) %>%
+        dplyr::select(-.perm_id, -.perm_geno)
+    }
+  }
+
+  permuted_results <- purrr::map_dfr(seq_len(n_perm), function(i) {
+    permuted_data <- permute_once(data)
+    perm_model_result <- fit_model_safely(model_formula, permuted_data, model_type, family)
+    if (is.null(perm_model_result$fit)) return(tibble::tibble())
+    broom.mixed::tidy(perm_model_result$fit) %>%
+      dplyr::filter(stringr::str_detect(term, interaction_term_regex)) %>%
+      dplyr::mutate(type = "null", model_formula = model_formula_str,
+                    warning = perm_model_result$warnings)
+  })
+
+  dplyr::bind_rows(observed_results, permuted_results)
+}
+
+
+
+plot_qq_pval_multi <- function(sim_df) {
+  # Load ggrepel for smart label positioning
+  library(ggrepel)
+  
+  # Ensure p-values are available and create model identifier
+  sim_df <- sim_df %>%
+    mutate(
+      model_formula_family = str_c(model_formula, " ", paste0(family), " ", paste0(model_type))
+    )
+  
+  # Calculate empirical p-values per model_formula
+  empirical_pvals <- sim_df %>%
+    group_by(model_formula_family) %>%
+    summarise(
+      observed_pval = p.value[type == "observed"],
+      null_pvals = list(p.value[type == "null"]),
+      empirical_pval = mean(null_pvals[[1]] <= observed_pval, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Prepare data for QQ plot (null points only)
+  # Convert p-values to -log10 scale for better visualization
+  qq_df <- sim_df %>%
+    filter(type == "null") %>%
+    group_by(model_formula_family) %>%
+    arrange(p.value) %>%
+    mutate(
+      neg_log10_pval = -log10(p.value),
+      expected_neg_log10 = -log10(ppoints(n(), a = 0))
+    ) %>%
+    ungroup()
+  
+  # Prepare observed points (one per model)
+  observed_points <- empirical_pvals %>%
+    mutate(
+      observed_neg_log10 = -log10(observed_pval),
+      # Expected value for the most extreme point
+      expected_neg_log10 = -log10(0.5 / lengths(null_pvals)),
+      label = paste0("p = ", signif(observed_pval, 3))
+    )
+  
+  # Plot
+  ggplot(qq_df, aes(x = expected_neg_log10, y = neg_log10_pval, color = model_formula_family)) +
+    geom_point(alpha = 0.4) +
+    geom_abline(slope = 1, intercept = 0, color = "gray") +
+    geom_point(data = observed_points, aes(x = expected_neg_log10, y = observed_neg_log10), 
+               shape = 4, size = 4, stroke = 1.5) + # "X"
+    geom_text_repel(data = observed_points, 
+                    aes(x = expected_neg_log10,
+                        y = observed_neg_log10,
+                        label = label,
+                        color = model_formula_family), 
+                    size = 3,
+                    min.segment.length = 0,  # Always draw connecting lines
+                    segment.color = "black",
+                    segment.alpha = 0.6,
+                    box.padding = 0.5,       # Space around labels
+                    point.padding = 0.3,     # Space around points
+                    force = 2,               # Repulsion strength
+                    max.overlaps = Inf) +    # Allow all labels to be shown
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+    labs(
+      x = "Expected -log10(p-value)",
+      y = "Observed -log10(p-value)",
+      color = "Model Formula",
+      title = "QQ Plot of Permuted vs Observed P-values (Multiple Models)"
+    ) +
+    theme_bw() +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "vertical"
+    )
+}
+
+```
+### Create a grid of models and plot them together
+```{r qqplot-model-grid}
+# Define models we'd like to try
+model_grid <- tibble(
+  model_formula = list(
+    as.formula("CPM ~ condition * genotype.num + (1 | donor)"),
+    as.formula("CPM ~ condition * genotype.num"),
+    as.formula("counts ~ condition * genotype.num"),
+    as.formula("counts ~ condition * genotype.num + (1 | donor)"),
+    as.formula("counts ~ condition * genotype.num + (1 | donor)"),
+    as.formula("log2CPM ~ condition * genotype.num + (1 | donor)"),
+    as.formula("rankNormCPM ~ condition * genotype.num + (1 | donor)")
+  ),
+  model_type = c("lmer", "glm", "glm", "glmer", "glmer.nb","lmer", "lmer"),
+  family = list(NA, gaussian(), poisson(), poisson(), NA, NA, NA)
+)
+```
+```{r qqplot, include=FALSE, message=FALSE, warning=FALSE}
+# Run all models and return one flat dataframe
+flat_qq_results <- list()  # Initialize list to collect results
+
+for (i in seq_len(nrow(model_grid))) {
+  cat("Running model", i, "...\n")
+
+  model_formula <- model_grid$model_formula[[i]]
+  model_type <- model_grid$model_type[[i]]
+  family <- model_grid$family[[i]]
+
+  # Show formula and model type for debugging
+  print(model_formula)
+  cat("Model type:", model_type, "\n")
+  if (inherits(family, "family")) {
+    cat("Family:", family$family, "\n")
+  } else {
+    cat("Family: NA\n")
+  }
+
+  # Run permutation test
+  # this block runs the function without retaining donor genotype pairing
+  # result <- generate_permuted_null(
+  #   model_formula = model_formula,
+  #   data = real_dat,
+  #   model_type = model_type,
+  #   family = family,
+  #   n_perm = 500
+  # )
+  
+  # this block runs the function that retains genotype for pair of samples from the same donor.
+  result <- generate_permuted_null(
+    model_formula = model_formula,
+    data = real_dat,
+    interaction_term_regex = ":",
+    n_perm = 500,
+    model_type = model_type,
+    family = family,
+    id_var = "donor",
+    condition_var = "condition",
+    genotype_var = "genotype.num",
+    perm_scheme = "permute_id_labels",   # or "permute_id_labels"
+    seed = 1
+  )
+
+  # Skip failed model
+  if (nrow(result) == 0) {
+    cat("Model", i, "returned no result. Skipping.\n")
+    next
+  }
+
+  # Add model metadata
+  model_metadata <- tibble(
+    model_type = model_type,
+    family = if (inherits(family, "family")) family$family else NA_character_
+  )
+
+  # Combine metadata + result
+  final_df <- bind_cols(model_metadata, result) %>%
+    select(!contains("..."))
+
+  # Save in list
+  flat_qq_results[[i]] <- final_df
+}
+
+# Combine all results into one data frame
+flat_qq_results <- bind_rows(flat_qq_results)
+
+```
+
+First plot is all tested models
+```{r}
+#plot the results
+plot1 <- plot_qq_pval_multi(flat_qq_results)
+plot1
+```
+Second plot is only the non-poisson models to "zoom in"
+```{r}
+plot2 <- plot_qq_pval_multi(
+  filter(flat_qq_results, is.na(family) | family != "poisson")
+)
+plot2
+```
+Third plot is only the CPM models to "zoom in" even more
+```{r}
+plot3 <- plot_qq_pval_multi(
+  filter(flat_qq_results, str_detect(model_formula, "CPM"))
+)
+plot3
+```
+Fourth plot is the CPM models with different mixed effects
+```{r}
+plot4 <- plot_qq_pval_multi(
+  flat_qq_results %>%
+    filter(
+      str_detect(model_formula, "CPM"),
+      !str_detect(model_formula, "log2CPM|rankNormCPM")
+    )
+)
+plot4
+```
+Fifth plot is only the CPM models in different transformations
+```{r}
+plot5 <- plot_qq_pval_multi(
+  flat_qq_results %>%
+    filter(
+      str_detect(model_formula, "CPM"),
+      str_detect(model_formula, "(1 | donor)"),
+      !str_detect(model_formula, "phase")
+    )
+)
+plot5
+```
+# full model for reQTL with covariates
+```{r make-full-log2CPM-reQTL-data-table}
+# peer factor
+dir.peer <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/peer/peer_factors"
+sc <- "MEL_PBS-IFNG"
+peer_factors <- data.table::fread(paste0(dir.peer, "/peer_factors_",sc,".tsv"))
+colnames(peer_factors)[1] <- "sample"
+
+# genotype PC
+genotype_pcs <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/donor_genotyping/hg38/genotype_PCs_for_modeling_07242025.txt") %>% 
+  dplyr::select(-c("FID","donor_num"))
+
+# Inputs
+this_matrix <- left_join(df.MEL.PBSIFNG, metadata.MEL.PBSIFNG[, c("sample","biosample","phase","sequencing_platform")], by="biosample") %>%
+  left_join(. , genotype, by="donor") %>%
+  left_join( . , peer_factors, by="sample") %>%
+  left_join( . , genotype_pcs, by="donor") %>%
+  mutate(log2CPM = log2(CPM + 1)) %>%
+  na.omit()
+peer_names <- paste0("PEER", 1:20)
+pc_names <- paste0("PC", 1:10)
+
+this_matrix$condition <- relevel(factor(as.character(this_matrix$condition)), ref = "PBS")
+this_matrix$genotype.nt <- relevel(factor(this_matrix$genotype.nt), ref = "TT")
+
+# Output results container
+results <- data.frame()
+
+# Loop over combinations of PEERs and PCs
+for (n_peer in 0:20) {
+  for (n_pc in 0:10) {
+    
+    print(paste0(n_peer,"_",n_pc))
+   # Safely select covariates
+    peer_vars <- if (n_peer > 0) peer_names[1:n_peer] else character(0)
+    pc_vars <- if (n_pc > 0) pc_names[1:n_pc] else character(0)
+    covariates <- c(peer_vars, pc_vars)
+    
+    # Build formula
+    # Build formula string
+    covariate_formula <- if (length(covariates) > 0) paste("+", paste(covariates, collapse = " + ")) else ""
+    full_formula <- as.formula(
+      paste("CPM ~ condition * genotype.num", covariate_formula, "+ (1 | donor)")
+    )
+    
+    # Fit model
+    model <- tryCatch(
+      lmerTest::lmer(full_formula, data = this_matrix, REML = FALSE),
+      error = function(e) NULL
+    )
+    
+    if (!is.null(model)) {
+      # Extract diagnostics
+      aic <- AIC(model)
+      bic <- BIC(model)
+      r2 <- r.squaredGLMM(model)[1, "R2m"]  # marginal R² (fixed effects) # You're evaluating models that differ only in their fixed-effect covariates (PEERs, PCs), while donor is always included as a random intercept. So: R2m tells you how much variance is explained by genotype, condition, and covariates
+      
+      # Extract interaction p-value
+      coef_table <- summary(model)$coefficients
+      interaction_row <- grep("condition.*:genotype.num", rownames(coef_table))
+      interaction_p <- if (length(interaction_row) > 0) coef_table[interaction_row, "Pr(>|t|)"] else NA
+      
+      # Shapiro-Wilk test of residuals
+      resids <- resid(model)
+      shapiro_p <- if (length(resids) >= 3) shapiro.test(resids)$p.value else NA # want it to be not significant
+      
+      # Save residual plot (optional)
+      plot_name <- paste0(Dir,"/model13_covariate_selection/residplot_peer", n_peer, "_pc", n_pc, ".png")
+      png(plot_name, width = 600, height = 600)
+      print(plot(model, which = 1,
+                 xlab = "Fitted values",
+                 ylab = "Residuals",
+                 main = paste("Residuals vs Fitted (PEER:", n_peer, "PC:", n_pc, ")"),
+                 col = "steelblue"))  # Set y-axis limits
+      # this_matrix$fitted <- fitted(model)
+      # this_matrix$resid <- resid(model)
+      # this_matrix$genotype_condition <- interaction(this_matrix$genotype.num, this_matrix$condition, sep = "_")
+      # 
+      # p <- ggplot(this_matrix, aes(x = fitted, y = resid, color = genotype_condition)) +
+      #   geom_point(alpha = 0.7) +
+      #   geom_hline(yintercept = 0, linetype = "solid", color = "gray40") +
+      #   labs(x = "Fitted values", y = "Residuals") +
+      #   theme_minimal()
+      # print(p)   
+      dev.off()
+
+
+
+      
+      # Save results
+      results <- rbind(results, data.frame(
+        n_peer = n_peer,
+        n_pc = n_pc,
+        AIC = aic,
+        BIC = bic,
+        adjR2 = r2,
+        p_interaction = interaction_p,
+        shapiro_p = shapiro_p,
+        formula = paste(deparse(full_formula), collapse = "")
+      ))
+    }
+  }
+}
+
+library(grid)
+library(png)
+plot_folder <- paste0(Dir,"/model13_covariate_selection")
+output_pdf <- paste0(Dir,"/model13_covariate_selection/residplot_by_covariates.pdf")
+
+# List all PNGs
+png_files <- list.files(plot_folder, pattern = "\\.png$", full.names = TRUE)
+
+# Extract PEER and PC numbers from file names
+file_info <- data.frame(
+  file = png_files,
+  n_peer = as.numeric(sub(".*peer(\\d+)_pc\\d+.*", "\\1", png_files)),
+  n_pc   = as.numeric(sub(".*pc(\\d+).*", "\\1", png_files)),
+  stringsAsFactors = FALSE
+)
+
+# Sort by n_peer first, then n_pc
+file_info <- file_info[order(file_info$n_peer, file_info$n_pc), ]
+
+# Create a multipage PDF
+pdf(output_pdf, width = 8, height = 8)
+for (f in file_info$file) {
+  img <- readPNG(f)
+  grid::grid.newpage()
+  grid::grid.raster(img)
+}
+dev.off()
+file.remove(png_files)
+
+# Save results table
+write.csv(results, paste0(Dir,"/model13_covariate_selection/reQTL_model_selection_results.csv"), row.names = FALSE)
+
+# Quick summary plot
+p_pval <- ggplot(results, aes(x = n_peer, y = n_pc, fill = -log10(p_interaction))) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "Interaction p-value across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "-log10(p)") +
+  theme_minimal()
+
+p_aic <- ggplot(results, aes(x = n_peer, y = n_pc, fill = AIC)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "AIC across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "AIC") +
+  theme_minimal()
+
+p_bic <- ggplot(results, aes(x = n_peer, y = n_pc, fill = BIC)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "BIC across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "BIC") +
+  theme_minimal()
+
+p_shapirop <- ggplot(results, aes(x = n_peer, y = n_pc, fill = shapiro_p)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "shapiro_p across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "shapiro_p") +
+  theme_minimal()
+
+p_adjr2 <- ggplot(results, aes(x = n_peer, y = n_pc, fill = adjR2)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "adjR2 across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "adjR2") +
+  theme_minimal()
+# I'm going to go with peer = 7, pc = 8
+```
+```{r final_reQTL_model}
+n_peer=5
+n_pc=2
+# Build covariate list
+peer_vars <- peer_names[1:n_peer]
+pc_vars <- pc_names[1:n_pc]
+covariates <- c(peer_vars, pc_vars)
+covariate_formula <- paste(covariates, collapse = "+ ")
+
+# fit model with interaction term
+full_formula <- as.formula(
+  paste("CPM ~ condition * genotype.num",
+        if (!is.null(covariate_formula)) paste("+", covariate_formula),
+        "+ (1 | donor)")
+)
+final_reQTL_model_MEL_IFNG <- lmerTest::lmer(full_formula, data = this_matrix, REML = FALSE)
+
+# check residual normality
+plot(final_reQTL_model_MEL_IFNG, which = 1)  # residuals vs fitted
+qqnorm(residuals(final_reQTL_model_MEL_IFNG)); qqline(residuals(final_reQTL_model_MEL_IFNG))  # normal Q-Q plot
+hist(residuals(final_reQTL_model_MEL_IFNG))  # optional
+
+```
+```{r loglik-interaction-term}
+n_peer=5
+n_pc=2
+# Build covariate list
+peer_vars <- peer_names[1:n_peer]
+pc_vars <- pc_names[1:n_pc]
+covariates <- c(peer_vars, pc_vars)
+covariate_formula <- paste(covariates, collapse = "+ ")
+
+# fit model with interaction term
+full_formula <- as.formula(
+  paste("CPM ~ condition * genotype.num",
+        if (!is.null(covariate_formula)) paste("+", covariate_formula),
+        "+ (1 | donor)")
+)
+model_with_covariates <- lmerTest::lmer(full_formula, data = this_matrix, REML = FALSE)
+
+# Fit model without covariates
+nested_formula <- "CPM ~ condition*genotype.num + (1|donor)"
+model_without_covariates <- lmerTest::lmer(nested_formula, data = this_matrix, REML = FALSE)
+
+# compare the two models
+tidy(anova(model_with_covariates, model_without_covariates, test="LRT"))
+```
+```{r make-full-CPM-reQTL-data-table}
+# testing with covariates to see whether the residuals of CPM linear model#13 can resolve the heteroskedacity issue in basic model without covariates.
+# peer factor
+dir.peer <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/peer/peer_factors"
+sc <- "MEL_PBS-IFNG"
+peer_factors <- data.table::fread(paste0(dir.peer, "/peer_factors_",sc,".tsv"))
+colnames(peer_factors)[1] <- "sample"
+
+# genotype PC
+genotype_pcs <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/donor_genotyping/hg38/genotype_PCs_for_modeling_07242025.txt") %>% 
+  dplyr::select(-c("FID","donor_num"))
+
+# Inputs
+this_matrix <- left_join(df.MEL.PBSIFNG, metadata.MEL.PBSIFNG[, c("sample","biosample","phase","sequencing_platform")], by="biosample") %>%
+  left_join(. , genotype, by="donor") %>%
+  left_join( . , peer_factors, by="sample") %>%
+  left_join( . , genotype_pcs, by="donor") %>%
+  mutate(log2CPM = log2(CPM + 1))
+peer_names <- paste0("PEER", 1:20)
+pc_names <- paste0("PC", 1:10)
+
+this_matrix$condition <- relevel(factor(as.character(this_matrix$condition)), ref = "PBS")
+this_matrix$genotype.nt <- relevel(factor(this_matrix$genotype.nt), ref = "TT")
+
+# Output results container
+results <- data.frame()
+
+# Loop over combinations of PEERs and PCs
+for (n_peer in 0:20) {
+  for (n_pc in 0:10) {
+    
+    print(paste0(n_peer,"_",n_pc))
+   # Safely select covariates
+    peer_vars <- if (n_peer > 0) peer_names[1:n_peer] else character(0)
+    pc_vars <- if (n_pc > 0) pc_names[1:n_pc] else character(0)
+    covariates <- c(peer_vars, pc_vars)
+    
+    # Build formula
+    # Build formula string
+    covariate_formula <- if (length(covariates) > 0) paste("+", paste(covariates, collapse = " + ")) else ""
+    full_formula <- as.formula(
+      paste("CPM ~ condition * genotype.num", covariate_formula, "+ (1 | donor)")
+    )
+    
+    # Fit model
+    model <- tryCatch(
+      lmerTest::lmer(full_formula, data = this_matrix, REML = FALSE),
+      error = function(e) NULL
+    )
+    
+    if (!is.null(model)) {
+      # Extract diagnostics
+      aic <- AIC(model)
+      bic <- BIC(model)
+      r2 <- r.squaredGLMM(model)[1, "R2m"]  # marginal R² (fixed effects) # You're evaluating models that differ only in their fixed-effect covariates (PEERs, PCs), while donor is always included as a random intercept. So: R2m tells you how much variance is explained by genotype, condition, and covariates
+      
+      # Extract interaction p-value
+      coef_table <- summary(model)$coefficients
+      interaction_row <- grep("condition.*:genotype.num", rownames(coef_table))
+      interaction_p <- if (length(interaction_row) > 0) coef_table[interaction_row, "Pr(>|t|)"] else NA
+      
+      # Shapiro-Wilk test of residuals
+      resids <- resid(model)
+      shapiro_p <- if (length(resids) >= 3) shapiro.test(resids)$p.value else NA # want it to be not significant
+      
+      # Save residual plot (optional)
+      plot_name <- paste0(Dir,"/model13_covariate_selection/residplot_peer", n_peer, "_pc", n_pc, ".png")
+      png(plot_name, width = 600, height = 600)
+      print(plot(model, which = 1,
+           xlab = "Fitted values",
+           ylab = "Residuals",
+           main = paste("Residuals vs Fitted (PEER:", n_peer, "PC:", n_pc, ")"),
+           col = "steelblue"))  # Set y-axis limits
+      dev.off()
+      
+      # Save results
+      results <- rbind(results, data.frame(
+        n_peer = n_peer,
+        n_pc = n_pc,
+        AIC = aic,
+        BIC = bic,
+        adjR2 = r2,
+        p_interaction = interaction_p,
+        shapiro_p = shapiro_p,
+        formula = paste(deparse(full_formula), collapse = "")
+      ))
+    }
+  }
+}
+
+library(grid)
+library(png)
+plot_folder <- paste0(Dir,"/model13_covariate_selection")
+output_pdf <- paste0(Dir,"/model13_covariate_selection/residplot_by_covariates.pdf")
+
+# List all PNGs
+png_files <- list.files(plot_folder, pattern = "\\.png$", full.names = TRUE)
+
+# Extract PEER and PC numbers from file names
+file_info <- data.frame(
+  file = png_files,
+  n_peer = as.numeric(sub(".*peer(\\d+)_pc\\d+.*", "\\1", png_files)),
+  n_pc   = as.numeric(sub(".*pc(\\d+).*", "\\1", png_files)),
+  stringsAsFactors = FALSE
+)
+
+# Sort by n_peer first, then n_pc
+file_info <- file_info[order(file_info$n_peer, file_info$n_pc), ]
+
+# Create a multipage PDF
+pdf(output_pdf, width = 8, height = 8)
+for (f in file_info$file) {
+  img <- readPNG(f)
+  grid::grid.newpage()
+  grid::grid.raster(img)
+}
+dev.off()
+file.remove(png_files)
+
+# Save results table
+write.csv(results, paste0(Dir,"/model13_covariate_selection/reQTL_model_selection_results.csv"), row.names = FALSE)
+
+# Quick summary plot
+p_pval <- ggplot(results, aes(x = n_peer, y = n_pc, fill = -log10(p_interaction))) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "Interaction p-value across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "-log10(p)") +
+  theme_minimal()
+
+p_aic <- ggplot(results, aes(x = n_peer, y = n_pc, fill = AIC)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "AIC across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "AIC") +
+  theme_minimal()
+
+p_bic <- ggplot(results, aes(x = n_peer, y = n_pc, fill = BIC)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "BIC across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "BIC") +
+  theme_minimal()
+
+p_shapirop <- ggplot(results, aes(x = n_peer, y = n_pc, fill = shapiro_p)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "shapiro_p across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "shapiro_p") +
+  theme_minimal()
+
+p_adjr2 <- ggplot(results, aes(x = n_peer, y = n_pc, fill = adjR2)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "adjR2 across PEER/PC settings\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "adjR2") +
+  theme_minimal()
+# I'm going to go with: 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+# coloc
+```{r get-gwas-summary}
+# === 1) Pick the file (GRCh38 harmonised recommended) ===
+url <- "https://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST90446001-GCST90447000/GCST90446792/harmonised/GCST90446792.h.tsv.gz"
+
+# === 2) Read and normalise columns ===
+ss <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/donor_genotyping/hg38/erap2/GCST90446792.h.tsv.gz")
+
+# Harmonised files typically expose both original and 'hm_*' fields. 
+# Prefer harmonised fields when available.
+has_hm <- "hm_variant_id" %in% names(ss)
+
+# Column selectors with fallbacks:
+col_snp  <- if (has_hm) "hm_variant_id" else "rsid"
+col_chr  <- "chromosome"
+col_pos  <- "base_pair_location"
+col_p    <- if ("p-value" %in% names(ss)) "p-value" else if ("p_value" %in% names(ss)) "p_value" else "p"
+col_eaf  <- if (has_hm && "hm_effect_allele_frequency" %in% names(ss)) "hm_effect_allele_frequency" else "effect_allele_frequency"
+
+need <- c(col_snp, col_chr, col_pos, col_p, col_eaf)
+stopifnot(all(need %in% names(ss)))
+
+data.table::setnames(ss, old = need,
+              new = c("snp","chr","pos","p","EAF"), skip_absent = TRUE)
+
+# Coerce chr to "chrN" or bare integer consistently (coloc doesn’t care either way)
+# Here we keep it numeric-like:
+ss[, chr := as.character(chr)]
+
+# Drop missing essentials
+ss <- ss[!is.na(p) & !is.na(pos) & !is.na(chr)]
+
+# === Define ERAP2 window ===
+# If your reQTL is GRCh38, these are GRCh38 coords; adjust padding as you like.
+library(biomaRt)
+mart <- useEnsembl("genes", dataset = "hsapiens_gene_ensembl")  # or GRCh=37
+g <- getBM(attributes = c("hgnc_symbol","chromosome_name","start_position","end_position"),
+           filters = "hgnc_symbol", values = "ERAP2", mart = mart)
+chr <- paste0("chr", g$chromosome_name[1])
+pad         <- 500000
+w_start <- g$start_position[1] - pad
+w_end   <- g$end_position[1] + pad
+
+gwas_sub <- ss[ss$chr == erap2_chr & ss$pos >= w_start & ss$pos <= w_end,]
+write(unique(gwas_sub$snp), "~/Downloads/nl/human/skin/eQTLs/donor_genotyping/hg38/snps.txt")
+# out of 8899 GWAS SNPs, there are 1037 that have data in our genotype data.
+
+# Derive MAF from EAF conservatively
+#ss[, MAF := pmin(ss$EAF, 1 - ss$EAF)]
+
+# Calculate MAF using my donor's data
+# in cluster use PLINK
+
+# Bring MAFs into R and merge with my GWAS data
+# 1) Read MAFs from PLINK
+maf <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/donor_genotyping/hg38/erap2_maf.tsv",
+             col.names = c("CHR","POS","ID","REF","ALT","AN","AC","MAF"))
+
+gwas_sub <- inner_join(gwas_sub, maf, by = c("snp"="ID")) %>% 
+  dplyr::select(c("snp","p","MAF")) %>%
+  na.omit() %>%
+  dplyr::filter(!is.na(MAF) & MAF>0 & MAF<1) # 8899 -> 2812
+
+# To remove duplicates while keeping the first occurrence:
+data.table::setDT(gwas_sub)
+data.table::setorder(gwas_sub, -MAF)
+gwas_sub <- gwas_sub[!duplicated(gwas_sub$snp)] # 2812 -> 2783
+
+# === 4) Add study-level N and case proportion s ===
+# GWAS Catalog harmonised files often don’t carry per-variant N; use study totals.
+# Fill in from the paper/GWAS Catalog study page (cases + controls).
+N_cases    <- 20873   # <- SET THIS
+N_controls <- 346719   # <- SET THIS
+N_total    <- N_cases + N_controls
+s_prop     <- if (N_total > 0) N_cases / N_total else NA_real_
+
+# Build coloc input list using the p-value interface
+gwas <- list(
+  type    = "cc",
+  snp     = gwas_sub$snp,
+  pvalues = gwas_sub$p,
+  MAF     = gwas_sub$MAF,
+  N       = N_total,
+  s       = s_prop
+)
+```
+```{r reQTL-summary-for-coloc}
+# simulate reQTL sumstats matched to SNP list
+snps <- gwas_sub$hm_rsid
+maf_dt <- gwas_sub$MAF
+N_reqtl <- 124
+# 4) Which SNPs you want to truly associate in the sim (can be empty)
+causal_snps <- c("rs2910686")  # or character(0) for pure null
+# 5) Effect size scale for causal SNP(s) (on standardized phenotype)
+effect_sd <- 0.10  # larger -> stronger signals
+# --- Build table and merge MAF ---
+reqtl <- data.frame(snp=gwas_sub$hm_rsid, 
+                       MAF=gwas_sub$MAF)
+
+# Clean up MAF edge cases (1037 --> 950)
+reqtl <- reqtl[!is.na(reqtl$MAF) & reqtl$MAF > 0 & reqtl$MAF < 1,]
+
+# --- Simulate betas/SE and p-values ---
+# For a simple linear model with standardized Y:
+# var(beta_hat) ≈ 1 / (2 * N * MAF * (1 - MAF))
+library(data.table)
+setDT(reqtl)
+reqtl$varbeta <- 1 / (2 * N_reqtl * reqtl$MAF * (1 - reqtl$MAF))
+reqtl$se <- sqrt(reqtl$varbeta)
+
+# Draw effects: zero for non-causal, N(0, effect_sd^2) for causal SNPs
+reqtl[, beta := 0]
+reqtl[snp %in% causal_snps, beta := rnorm(.N, mean = 0, sd = effect_sd)]
+
+# Get Z and p
+reqtl[, z := beta / se]
+reqtl[, p := 2 * pnorm(-abs(z))]
+
+# If you have beta_hat and se_hat from your reQTL interaction term:
+s <- summary(final_reQTL_model_MEL_IFNG)
+coef_table <- s$coefficients
+beta_hat <- coef_table["conditionIFNG:genotype.num", "Estimate"]
+se_hat   <- coef_table["conditionIFNG:genotype.num", "Std. Error"]
+pval     <- coef_table["conditionIFNG:genotype.num", "Pr(>|t|)"]
+
+# Update the row and recompute p
+reqtl[snp == "rs2910686", `:=`(beta = beta_hat, se = se_hat, z = beta_hat/se_hat,
+                               p = pval)]
+
+# OR if you only have a p-value (no beta/se):
+# real_p <- 3.2e-8
+# reqtl[snp == "rs2910686", `:=`(p = real_p)]
+
+# make a coloc-ready list right away (p-value interface) ---
+D2_sim <- list(
+  type    = "quant",
+  snp     = reqtl$snp,
+  pvalues = reqtl$p,
+  MAF     = reqtl$MAF,
+  N       = N_reqtl
+)
+```
+```{r reQTL-run-model-ERAP2-locus}
+# /pi/manuel.garber-umw/human/skin/eQTLs/donor_genotyping/hg38/erap2_subset.vcf.gz
+
+# genotype table
+genotype_table <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/donor_genotyping/hg38/erap2/ERAP2_snps.bed")
+genotype_table <- genotype_table %>% 
+  dplyr::filter(ID %in% gwas[["snp"]]) %>% # 961 snps also have GWAS results
+  distinct(ID, .keep_all=TRUE)
+colnames(genotype_table) <- gsub("F0","F", gsub(":GT", "", gsub("skineQTL-","",colnames(genotype_table))))
+
+
+# expression table
+this_df = df.MEL.PBSIFNG
+this_metadata = metadata.MEL.PBSIFNG
+this_peerfactors = peer_factors
+  
+pval_vector = c()
+term <- "conditionIFNG:genotype.num"   # the interaction you care about
+for (i in 1:nrow(genotype_table)) {
+  print(i)
+  snpinfo <- genotype_table[i, ] %>% t() %>%
+    as.data.frame() %>%
+    rownames_to_column("donor") %>%
+    set_colnames(c("donor","GT"))
+  REF <- snpinfo$GT[5]
+  ALT <- snpinfo$GT[6]
+  snpid <- snpinfo$GT[4]
+  
+  genotype <- snpinfo[7:nrow(snpinfo), ]
+  genotype <- genotype %>%
+    mutate(
+      genotype.num = case_when(
+        GT == "0|0" ~ 0,
+        GT %in% c("0|1", "1|0") ~ 1,
+        GT == "1|1" ~ 2,
+        TRUE ~ NA_real_
+      ),
+      genotype.nt = case_when(
+        GT == "0|0" ~ paste0(REF,"|",REF),
+        GT == "0|1" ~ paste0(REF,ALT,"|",ALT,REF),
+        GT == "1|0" ~ paste0(REF,ALT,"|",ALT,REF),
+        GT == "1|1" ~ paste0(ALT,"|",ALT),
+        TRUE ~ NA_character_
+      )
+    )
+  
+  # compile data matrix
+  this_matrix <- left_join(this_df, this_metadata[, c("sample","biosample","phase","sequencing_platform")], by="biosample") %>%
+    left_join(. , genotype, by="donor") %>%
+    left_join( . , peer_factors, by="sample") %>%
+    left_join( . , genotype_pcs, by="donor") %>%
+    mutate(log2CPM = log2(CPM + 1)) %>%
+    na.omit()
+  this_matrix$condition <- relevel(factor(as.character(this_matrix$condition)), ref = "PBS")
+  
+  # add covariates
+  n_peer=5
+  n_pc=2
+  # Build covariate list
+  peer_vars <- peer_names[1:n_peer]
+  pc_vars <- pc_names[1:n_pc]
+  covariates <- c(peer_vars, pc_vars)
+  covariate_formula <- paste(covariates, collapse = "+ ")
+  
+  # fit model with interaction term
+  full_formula <- as.formula(
+    paste("CPM ~ condition * genotype.num",
+          if (!is.null(covariate_formula)) paste("+", covariate_formula),
+          "+ (1 | donor)")
+  )
+
+  fit <- lmerTest::lmer(full_formula, data = this_matrix, REML = FALSE)
+  tab <- summary(fit)$coefficients
+  term <- "conditionIFNG:genotype.num"
+  if (term %in% rownames(tab)) {
+    pval <- tab[term, "Pr(>|t|)"]
+  } else {
+    pval <- NA_real_
+  }
+  pval_vector <- c(pval_vector, pval)
+}
+
+# compile output table
+reqtl_res <- data.frame(snp=genotype_table$ID, pval=pval_vector) %>%
+  na.omit() %>%
+  left_join( . , gwas_sub[,c("snp","MAF")], by="snp")
+
+# make a coloc-ready list right away (p-value interface) ---
+N_reqtl <- nrow(this_matrix)
+eqtl <- list(
+  type    = "quant",
+  snp     = reqtl_res$snp,
+  pvalues = reqtl_res$pval,
+  MAF     = reqtl_res$MAF,
+  N       = N_reqtl
+  )
+```
+```{r coloc}
+library(coloc)
+# https://chr1swallace.github.io/coloc/
+
+##### harmonize gwas and eQTL data #####
+common_snps <- intersect(gwas$snp, eqtl$snp)
+idx_gwas <- gwas$snp %in% common_snps
+idx_eqtl <- eqtl$snp %in% common_snps
+# 3) Subset using those indices
+gwas$snp     <- gwas$snp[idx_gwas]
+gwas$pvalues <- gwas$pvalues[idx_gwas]
+gwas$MAF     <- gwas$MAF[idx_gwas]
+
+eqtl$snp       <- eqtl$snp[idx_eqtl]
+eqtl$pvalues   <- eqtl$pvalues[idx_eqtl]
+eqtl$MAF       <- eqtl$MAF[idx_eqtl]
+
+# 4) Put both in the SAME order
+ord_gwas <- match(common_snps, gwas$snp)
+ord_eqtl <- match(common_snps, eqtl$snp)
+
+gwas$snp     <- gwas$snp[ord_gwas]
+gwas$pvalues <- gwas$pvalues[ord_gwas]
+gwas$MAF     <- gwas$MAF[ord_gwas]
+
+eqtl$snp       <- eqtl$snp[ord_eqtl]
+eqtl$pvalues   <- eqtl$pvalues[ord_eqtl]
+eqtl$MAF       <- eqtl$MAF[ord_eqtl]
+
+# 5) Final sanity checks
+stopifnot(identical(gwas$snp, eqtl$snp))
+stopifnot(length(gwas$snp) == length(gwas$pvalues),
+          length(gwas$snp) == length(gwas$MAF),
+          length(eqtl$snp) == length(eqtl$pvalues),
+          length(eqtl$snp) == length(eqtl$MAF))
+
+# (optional) drop any NA / out-of-range MAFs or pvals
+keep <- is.finite(gwas$MAF) & gwas$MAF>0 & gwas$MAF<1 &
+        is.finite(eqtl$MAF) & eqtl$MAF>0 & eqtl$MAF<1 &
+        is.finite(gwas$pvalues) & is.finite(eqtl$pvalues)
+gwas$snp     <- gwas$snp[keep]
+gwas$pvalues <- gwas$pvalues[keep]
+gwas$MAF     <- gwas$MAF[keep]
+eqtl$snp       <- eqtl$snp[keep]
+eqtl$pvalues   <- eqtl$pvalues[keep]
+eqtl$MAF       <- eqtl$MAF[keep]
+
+##### choose priors #####
+#Defaults are often fine, but for cis molecular traits a common choice is a bit more liberal on colocalization:
+#p1 = prior a SNP is associated with trait 1 (GWAS), e.g. 1e-4
+#p2 = prior a SNP is associated with trait 2 (eQTL/reQTL), e.g. 1e-4
+#p12 = prior it’s associated with both, e.g. 1e-5 (some use 1e-6—you can sensitivity-check)
+#res <- coloc.abf(gwas, D2_sim, p1=1e-4, p2=1e-4, p12=1e-5) # this uses simulated data with just rs2910686 as true signal
+res <- coloc.abf(gwas, eqtl, p1=1e-4, p2=1e-4, p12=1e-5)
+res$summary
+#Interpretation (the big five):
+#PP.H0: no association with either
+#PP.H1: GWAS only
+#PP.H2: reQTL only
+#PP.H3: both, different causal variants
+#PP.H4: both, shared causal variant (this is what you want high)
+#Rules of thumb: PP.H4 > 0.8 is strong; 0.5–0.8 suggestive; also look at PP.H3.
+
+##### Inspect the candidate SNPs #####
+hits <- as.data.table(res$results)[order(-SNP.PP.H4)]
+head(hits[, .(snp, SNP.PP.H4, pvalues.df1 = p.gwas, pvalues.df2 = p.eqtl)])
+
+##### plot locus-compare #####
+m <- merge(
+  data.table(snp = gwas$snp, p_gwas = gwas$pvalues),
+  data.table(snp = eqtl$snp, p_reqtl = eqtl$pvalues),
+  by = "snp"
+)
+
+ggplot(m, aes(-log10(p_gwas), -log10(p_reqtl))) +
+  geom_point(alpha = 0.6) +
+  labs(x = "-log10 p (GWAS)", y = "-log10 p (reQTL)") +
+  theme_minimal()
+
+##### plot manhattan plot #####
+# Example data frame for GWAS
+df_gwas <- data.frame(
+  snp = gwas$snp,
+  pos = genotype_table[genotype_table$ID%in%gwas$snp,]$START,  # if IDs are chr:pos, extract pos
+  pval = gwas$pvalues
+)
+
+# Example data frame for eQTL
+df_eqtl <- data.frame(
+  snp = eqtl$snp,
+  pos = genotype_table[genotype_table$ID%in%eqtl$snp,]$START,
+  pval = eqtl$pvalues
+)
+
+# GWAS Manhattan (top)
+p1 <- ggplot(df_gwas, aes(x = pos, y = -log10(pval))) +
+  geom_point(size = 1) +
+  theme_bw() +
+  labs(x = NULL, y = "-log10 p (GWAS)") +
+  theme(axis.text.x = element_blank())
+
+# eQTL Manhattan (bottom)
+p2 <- ggplot(df_eqtl, aes(x = pos, y = -log10(pval))) +
+  geom_point(size = 1, color = "firebrick") +
+  theme_bw() +
+  labs(x = "Genomic position", y = "-log10 p (reQTL)")
+
+# Combine vertically
+library(cowplot)
+combined <- plot_grid(p1, p2, ncol = 1, align = "v", axis = "lr")
+title <- ggdraw() + 
+  draw_label("GWAS vs reQTL Manhattan Plots for ERAP2 locus", fontface = 'bold', x = 0.5, hjust = 0.5) 
+final_plot <- plot_grid(title, combined, ncol = 1, rel_heights = c(0.06, 1))
+final_plot
+
+##### plot coloc with Manhattan Plot with LD colors #####
+lead_snp_gwas <- gwas$snp[which.min(gwas$pvalues)]
+lead_snp_eqtl <- eqtl$snp[which.min(eqtl$pvalues)]
+# plink --vcf erap2_subset.vcf.gz \
+#       --r2 gz \
+#       --ld-snp rs2910686 \
+#       --ld-window-kb 2000 --ld-window 999999 --ld-window-r2 0 \
+#       --out ld_rs2910686
+ld <- data.table::fread(paste0("~/Downloads/nl/human/skin/eQTLs/donor_genotyping/hg38/erap2/ld_",lead_snp_eqtl,".ld.gz"))[, .(snp = SNP_B, R2)]
+
+# gwas/eqtl should already be intersected and aligned; add numeric pos
+df_gwas <- data.frame(
+  snp = gwas$snp,
+  pos = genotype_table[genotype_table$ID%in%gwas$snp,]$START,  # if IDs are chr:pos, extract pos
+  pval = gwas$pvalues
+)
+
+# Example data frame for eQTL
+df_eqtl <- data.frame(
+  snp = eqtl$snp,
+  pos = genotype_table[genotype_table$ID%in%eqtl$snp,]$START,
+  pval = eqtl$pvalues
+)
+# merge LD
+df_gwas <- df_gwas %>% left_join(ld, by="snp")
+df_eqtl <- df_eqtl %>% left_join(ld, by="snp")
+
+# set lead to R2=1; NA -> 0
+df_gwas$R2[is.na(df_gwas$R2) & df_gwas$snp==lead_snp_gwas] <- 1
+df_eqtl$R2[is.na(df_eqtl$R2) & df_eqtl$snp==lead_snp_eqtl] <- 1
+df_gwas$R2[is.na(df_gwas$R2)] <- 0
+df_eqtl$R2[is.na(df_eqtl$R2)] <- 0
+
+# LD bins (shared legend)
+breaks <- c(0, .2, .4, .6, .8, 1)
+labels <- c("0–0.2","0.2–0.4","0.4–0.6","0.6–0.8","0.8–1")
+df_gwas$ld_bin <- cut(df_gwas$R2, breaks, labels, include.lowest=TRUE)
+df_eqtl$ld_bin <- cut(df_eqtl$R2, breaks, labels, include.lowest=TRUE)
+
+# x-range lock (so panels align)
+xr <- range(c(df_gwas$pos, df_eqtl$pos), na.rm=TRUE)
+#xr <- range(c(w_start, w_end), na.rm=TRUE)
+ld_cols <- c("0–0.2"="#2166ac","0.2–0.4"="#4393c3","0.4–0.6"="#92c5de",
+             "0.6–0.8"="#f4a582","0.8–1"="#d6604d")
+
+p1 <- ggplot(df_gwas, aes(pos, -log10(pval), color=ld_bin)) +
+  geom_point(size=1.5) +
+  scale_color_manual(values=ld_cols, na.value="grey70", name=expression(r^2)) +
+  coord_cartesian(xlim=xr) +
+  labs(y="-log10 p (GWAS)", x=NULL) +
+  theme_bw() +
+  theme(legend.position="top", axis.text.x=element_blank())
+
+p1 <- p1 +
+  geom_point(data=subset(df_gwas, snp==lead_snp_gwas),
+             size=2.5, shape=21, stroke=0.8, color="black", fill="gold") +
+  geom_label_repel(data=subset(df_gwas, snp==lead_snp_gwas),
+                   aes(label=snp), nudge_y=0.8, fill="gold", size=3,
+                   color="black", label.size=0.2, seed=1)
+
+p2 <- ggplot(df_eqtl, aes(pos, -log10(pval), color=ld_bin)) +
+  geom_point(size=1.5) +
+  scale_color_manual(values=ld_cols, na.value="grey70", name=expression(r^2)) +
+  coord_cartesian(xlim=xr) +
+  labs(y="-log10 p (reQTL)", x="Genomic position") +
+  theme_bw() +
+  theme(legend.position="none")
+
+p2 <- p2 +
+  geom_point(data=subset(df_eqtl, snp==lead_snp_eqtl),
+             size=2.5, shape=21, stroke=0.8, color="black", fill="gold") +
+  geom_label_repel(data=subset(df_eqtl, snp==lead_snp_eqtl),
+                   aes(label=snp), nudge_y=0.8, fill="gold", size=3,
+                   color="black", label.size=0.2, seed=2)
+
+# generate track for the region
+mart <- useEnsembl("genes", dataset = "hsapiens_gene_ensembl")  # or GRCh=37
+g <- getBM(attributes = c("hgnc_symbol","chromosome_name","start_position","end_position"),
+           filters = "hgnc_symbol", values = "ERAP2", mart = mart)
+chr <- g$chromosome_name[1]
+start <- min(c(df_gwas$pos, df_eqtl$pos))
+end   <- max(c(df_gwas$pos, df_eqtl$pos))
+genes <- getBM(attributes=c("hgnc_symbol","chromosome_name","start_position","end_position","strand"),
+               filters=c("chromosome_name","start","end"),
+               values=list(chr, start, end),
+               mart=mart)
+setDT(genes) 
+genes <- genes[genes$hgnc_symbol!="", , drop=FALSE]
+genes[, row := (seq_len(.N) - 1L) %% 3L]
+y0 <- 0
+step <- 0.25
+genes[, `:=`(y = y0 + row*step, mid = (start + end)/2)]
+
+
+
+
+combined <- plot_grid(p1, p2, ncol=1, align="v", axis="lr",
+                      rel_heights=c(1,1,0.45))
+
+title <- ggdraw() + draw_label(
+  "Chron's Disease GWAS vs MEL IFNG reQTL at ERAP2 \nwith LD coloring r.s.t. lead reQTL",
+  fontface='bold', x=.5, hjust=.5, size=8
+)
+
+final_plot <- plot_grid(title, combined, ncol=1, rel_heights=c(0.06,1))
+final_plot
+
+##### If multiple signals exist → use SuSiE colocalization #####
+# If you suspect >1 causal variant in the window, switch to coloc.susie(). You’ll need approximate betas and variances. From p-values you can back-out Z and then beta/se if you have MAF & N:
+# If you have actual betas/SEs for both studies, use those—much better than back-calculations.
+
+# Approximate z from two-sided p and sign (if you have effect directions):
+q2z <- function(p, sign=1) sign * qnorm(p/2, lower.tail=FALSE)
+
+# For a quantitative trait with standardized phenotype:
+# varbeta ≈ 1 / (2 * N * MAF * (1 - MAF)
+varbeta <- function(N, maf) 1 / (2 * N * maf * (1 - maf))
+
+# Build susie inputs:
+D2_susie <- list(
+  snp     = reqtl_sub$snp,
+  beta    = q2z(reqtl_sub$p) * sqrt(varbeta(reqtl_sub$N[1], reqtl_sub$MAF)), # assumes sign=+
+  varbeta = varbeta(reqtl_sub$N[1], reqtl_sub$MAF),
+  type    = "quant",
+  MAF     = reqtl_sub$MAF
+)
+# Do similar for GWAS (type="cc" is trickier; consider using published betas/SEs if available).
+
+
+# QC checklist (don’t skip)
+#Same build (hg19 vs hg38)
+#Same rsIDs/positions
+#Remove/handle palindromic A/T or C/G with high MAF
+#Reasonable MAF source (study or matched ancestry reference)
+#N and (for GWAS) s are correct
+#Sensitivity-check priors (p12 especially)
+#Consider trying ±250 kb vs ±500 kb windows; see if results are stable
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

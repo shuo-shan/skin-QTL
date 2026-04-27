@@ -1,0 +1,145 @@
+---
+title: "DEgenes_heatmap"
+author: "Shuo Shan"
+date: "01/05/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Load packages  
+```{r package, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(magrittr)
+library(MASS) 
+library(reshape2) 
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(gridExtra)
+library(ggpubr)
+library(plotly)
+library(RCurl)
+library(ComplexHeatmap)
+
+Dir="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/mydata_vs_vitiligoscRNAseq"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment.RData'))
+#load(paste0(Dir,'/myEnvironment.RData'))
+```
+  
+## Load batch-corrected CPM, metadata, and DEseq2 results for all samples
+```{r load-my-DESeq2-results}
+dir.krt <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/keratinocytes/pipeline_11192022/analysis"
+dir.mel <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/melanocytes/pipeline_12022022/analysis"
+dir.frb <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/fibroblasts/pipeline_11192022/analysis"
+
+res.krt <- read.table(paste0(dir.krt,"/DESeq2_results_IFNvsPBS.txt"),header=T,sep=" ") %>% na.omit()
+res.mel <- read.table(paste0(dir.mel,"/DESeq2_results_IFNvsPBS.txt"),header=T,sep=" ") %>% na.omit()
+res.frb <- read.table(paste0(dir.frb,"/DESeq2_results_IFNvsPBS.txt"),header=T,sep=" ") %>% na.omit()
+
+DEG <- unique(c(res.krt[which(res.krt$padj<0.05 & abs(res.krt$log2FoldChange)>1.5),"gene"],
+                res.mel[which(res.mel$padj<0.05 & abs(res.mel$log2FoldChange)>1.5),"gene"],
+                res.frb[which(res.frb$padj<0.05 & abs(res.frb$log2FoldChange)>1.5),"gene"]))
+```
+
+## Load yuqing's scRNAseq vitiligo data
+```{r load-vitiligo-scRNAseq-data}
+# KC.1 is the most basal, KC.4 is most differentiated. KC.act is KRT17+. KC.S100P is follicular
+dir.vitiligo <- "~/Downloads/nl/human/skin/eQTLs/literature/Yuqing_vitiligo"
+vit.res.kc.1 <- read.table(paste0(dir.vitiligo,"/SSC_KC.1_Vitiligo-active_Control_Lesional.txt"),header=T,sep="\t") %>% mutate(celltype="KC.1") %>% rownames_to_column("gene")
+vit.res.kc.2 <- read.table(paste0(dir.vitiligo,"/SSC_KC.2_Vitiligo-active_Control_Lesional.txt"),header=T,sep="\t") %>% mutate(celltype="KC.2") %>% rownames_to_column("gene")
+vit.res.kc.3 <- read.table(paste0(dir.vitiligo,"/SSC_KC.3_Vitiligo-active_Control_Lesional.txt"),header=T,sep="\t") %>% mutate(celltype="KC.3") %>% rownames_to_column("gene")
+vit.res.kc.4 <- read.table(paste0(dir.vitiligo,"/SSC_KC.4_Vitiligo-active_Control_Lesional.txt"),header=T,sep="\t") %>% mutate(celltype="KC.4") %>% rownames_to_column("gene")
+vit.res.kc.act <- read.table(paste0(dir.vitiligo,"/SSC_KC.act_Vitiligo-active_Control_Lesional.txt"),header=T,sep="\t") %>% mutate(celltype="KC.act") %>% rownames_to_column("gene")
+vit.res.kc.S100P <- read.table(paste0(dir.vitiligo,"/SSC_KC.S100P_Vitiligo-active_Control_Lesional.txt"),header=T,sep="\t") %>% mutate(celltype="KC.S100P") %>% rownames_to_column("gene")
+vit.res.mel <- read.table(paste0(dir.vitiligo,"/SSC_MEL_Vitiligo-active_Control_Lesional.txt"),header=T,sep="\t") %>% mutate(celltype="MEL") %>% rownames_to_column("gene")
+```
+
+## Scatterplot of melanocyte data
+```{r scatter-mel}
+mydf <- res.mel[which(res.mel$padj<0.05),c("gene","log2FoldChange")] %>% 
+  mutate(direction_my=ifelse(log2FoldChange>0,"up",ifelse(log2FoldChange< -0,"down","nochange"))) %>%
+  set_colnames(c("gene","log2FoldChange_my","direction_my"))
+
+vitdf <- vit.res.mel[,c("gene","logFC","FDR")] %>% 
+  dplyr::filter(FDR<0.05) %>%
+  mutate(direction_my=ifelse(logFC>0,"up",ifelse(logFC< -0,"down","nochange"))) %>%
+  set_colnames(c("gene","log2FoldChange_vit","FDR_vit","direction_vit"))
+
+df <- inner_join(vitdf,mydf,by="gene")
+df$direction_comp <- paste0(df$direction_vit,"_",df$direction_my) # up_down means "up in vitiligo, but down in IFNg"
+table(df$direction_comp)
+df[which(df$direction_comp=="up_up"),"gene"] %>% sort %>% write.table(. , paste0(Dir,"/temp_genes.txt"),quote=F,col.names=F,row.names=F)
+
+#down_down   down_up   up_down     up_up 
+#       66        39        11        52 
+comp_tab = read.csv(paste0(Dir,"/mel_comparison_table.txt"), header=TRUE, sep="\t")
+tab_melt = melt(comp_tab, id = c("DE_result"))
+colours = c( "#A54657",  "#582630", "#F7EE7F", "#4DAA57","#F1A66A","#F9ECCC", "#679289", "#33658A","#86BBD8")
+tab_melt$DE_result = factor(tab_melt$DE_result, levels=unique(tab_melt$DE_result))
+
+pdf(paste0(Dir,"/bubble_chart_mel.pdf"),width=6,height=4)
+p = ggplot(tab_melt, aes(x = DE_result, y = variable)) + 
+  geom_point(aes(size = value, fill = variable), alpha = 0.75, shape = 21) +
+  scale_size_continuous(limits = c(0, 35), range = c(1,17), breaks = c(5,10,20,35)) + 
+  labs( x= "", y = "", size = "Relative Abundance (%)", fill = "")  + 
+  theme(legend.key=element_blank(), 
+  axis.text.x = element_text(colour = "black", size = 12, face = "bold", angle = 90, vjust = 0.3, hjust = 1), 
+  axis.text.y = element_text(colour = "black", face = "bold", size = 11), 
+  legend.text = element_text(size = 10, face ="bold", colour ="black"), 
+  legend.title = element_text(size = 12, face = "bold"), 
+  panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA, size = 1.2), 
+  legend.position = "right") +  
+  scale_fill_manual(values = colours, guide = FALSE) + 
+  scale_y_discrete(limits = rev(levels(tab_melt$variable))) +
+  ggtitle("melanocytes")
+p
+dev.off()
+```
+
+## Scatterplot of keratinocyte data
+```{r scatter-krt}
+mydf <- res.krt[which(res.krt$padj<0.1),c("gene","log2FoldChange")] %>% 
+  mutate(direction_my=ifelse(log2FoldChange>0,"up",ifelse(log2FoldChange<0,"down","nochange"))) %>%
+  set_colnames(c("gene","log2FoldChange_my","direction_my"))
+
+vitdf <- vit.res.kc.4[,c("gene","logFC","FDR")] %>% 
+  mutate(sigtest=ifelse(.$FDR<0.1,"FDR<0.1","FDR>=0.1")) %>%
+  dplyr::filter(FDR<0.1) %>%
+  mutate(direction_my=ifelse(logFC>0,"up",ifelse(logFC<0,"down","nochange"))) %>%
+  set_colnames(c("gene","log2FoldChange_vit","FDR_vit","sigtest_vit","direction_vit"))
+
+df <- inner_join(mydf,vitdf,by="gene")
+df$direction_comp <- paste0(df$direction_vit,"_",df$direction_my)
+table(df$direction_comp)
+# down_down   down_up   up_down     up_up 
+#       536       501      1017      1003
+
+table(df[which(df$direction_comp=="down_down"),]$sigtest_vit) # FDR<0.1 (58), FDR>=0.1 (478)
+table(df[which(df$direction_comp=="up_up"),]$sigtest_vit) # FDR<0.1 (253), FDR>=0.1 (750)
+table(df[which(df$direction_comp=="up_down"),]$sigtest_vit) # FDR<0.1 (42), FDR>=0.1 (459)
+table(df[which(df$direction_comp=="down_up"),]$sigtest_vit) # FDR<0.1 (175), FDR>=0.1 (842)
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

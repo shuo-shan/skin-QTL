@@ -1,0 +1,730 @@
+---
+title: "skineQTL3ctk_01152025shallowtest"
+author: "Crystal Shan"
+date: "2025-02-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r package, warning=FALSE}
+library(tidyverse)
+library(DESeq2)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(gridExtra)
+library(ggpubr)
+library(ComplexHeatmap)
+library(cowplot)
+library(sva)
+library(clusterProfiler)
+library(plotly)
+
+Dir="~/Downloads/nl/human/skin/eQTLs/Azenta_sequencing/01152025_shallowtest/"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment.RData'))
+load(paste0(Dir,'/myEnvironment.RData'))
+```
+
+```{r functions}
+# useful function
+convert_meta_genes <- function(gene_vector) {
+  # Identify meta genes in the input vector
+  meta_genes <- gene_vector[grepl("meta", gene_vector)]
+  non_meta_genes <- gene_vector[!grepl("meta", gene_vector)]
+  
+  # Convert meta genes to actual gene names using metagene_dict
+  meta_to_gene <- metagene_dict$name[metagene_dict$meta %in% meta_genes]
+  
+  # Combine non-meta genes and converted meta genes, ensuring uniqueness
+  converted_genes <- unique(c(non_meta_genes, meta_to_gene))
+  
+  return(converted_genes)
+}
+
+# Example usage:
+# result <- convert_meta_genes(c(top100_PC1, top100_PC2), metagene_dict)
+niceKmeans <-function (df, k, kmeans.algorithm = "Lloyd", iter.max = 1000, nstart=100) {
+  
+  result = data.frame();
+  source = t(scale(t(df)));
+  kmeans = kmeans(source, centers = k, iter.max = iter.max, algorithm=kmeans.algorithm, nstart=nstart);
+  clustered = data.frame();
+  breaks = c();
+  for (i in 1:k) {
+    print(sprintf("Doing cluster %i",i))
+    cluster = source[kmeans$cluster==i,];
+    rows = row.names(cluster);
+    clust = heatmap.2(as.matrix(cluster), distfun=function(x) as.dist((1-cor(t(x)))/2))
+    cluster.ordered = cluster[clust$rowInd,];
+    cluster.ordered.genes = rows[clust$rowInd];
+    row.names(cluster.ordered) = cluster.ordered.genes;
+    class = data.frame(row.names=cluster.ordered.genes);
+    class[,"class"] = i 
+    cluster.ordered = cbind(cluster.ordered, class);
+    clustered = rbind(clustered, cluster.ordered);
+    if(i > 1 & i < k) {
+      breaks[i] = as.numeric(breaks[i-1]) + length(rows);
+    } else if(i==1) {
+      breaks[i] = length(rows);
+    }
+  }
+  
+  result <- list();
+  result$clustered <- clustered;
+  result$breaks <- breaks;
+  return(result);
+}
+create_table <- function(Dir, file_lst) {
+  f=file_lst[1]
+  sample=gsub("_sorted_esat\\.txt\\.gene\\.txt","",f)
+  df <- read.table(paste0(Dir,"/",f), sep="\t", header=TRUE) %>% 
+    tidyr::unite( .,"region",c("Symbol","chr","strand"),sep=";",remove=TRUE) %>% 
+    mutate(sum=rowSums(select_if(., is.numeric))) %>%
+    dplyr::select(c("region",sum)) %>% 
+    magrittr::set_colnames(c("region",sample))
+  
+  if (length(file_lst) > 1) {
+    for (f in file_lst[2:length(file_lst)]) {
+      sample=gsub("_sorted_esat\\.txt\\.gene\\.txt","",f)
+      df.this <- read.table(paste0(Dir,"/",f), sep="\t", header=TRUE) %>% 
+        tidyr::unite( .,"region",c("Symbol","chr","strand"),sep=";",remove=TRUE) %>% 
+        mutate(sum=rowSums(select_if(., is.numeric))) %>%
+        dplyr::select(c("region",sum)) %>% 
+        magrittr::set_colnames(c("region",sample))
+    
+    df <- dplyr::left_join(df,df.this,by="region")
+    }
+  }
+  df <- df %>% tibble::column_to_rownames( . , "region")
+  return(df)
+  rm(f,sample,df,df.this)
+}
+
+# check which variable correlates with each PC the most.
+best_correlation_with_pc <- function(pcs, metadata, pc.n) {
+  total.pcc=c()
+  pca.this=pcs[,pc.n]
+  for (x in colnames(metadata)) {
+    metadata.this <- as.numeric(as.factor(metadata[,x]))
+    total.pcc=c(total.pcc,cor(pca.this,metadata.this))
+  }
+  total.df=data.frame(feature=colnames(metadata),pcc=total.pcc,pcc.magnitude=abs(total.pcc))
+  return(total.df)
+}
+```
+### Overview
+Primary newborn foreskin melanocytes were stimulated with 10ng/ml TGFB1 or TGFB2 for various timepoints. Bulk RNAseq libraries were prepared by celseq2 method with pooling, and sequenced by Azenta in two batches. Any samples that were sequenced twice had their fastq files concatenated before aligning to the genome and counting reads.
+
+## load ESAT count table for all samples
+```{r load-new-data}
+Dir.esat=paste0(Dir,"/DolphinNext/report10209/ESAT")
+
+# 1. import ESAT counts into master table
+flst <- list.files(path = Dir.esat, pattern = "esat.txt.gene.txt")
+counts <- create_table(Dir.esat, flst) %>% rownames_to_column("key") %>%
+  tidyr::separate("key",into=c("gene",NA,NA),sep=";",remove=TRUE) %>% column_to_rownames("gene")
+dim(counts)
+
+# remove mitochondria genes
+MTgenes=read.table("~/Downloads/nl/human/skin/eQTLs/literature/UCSC_tracks/Ensembl_GRCh38.105_mitochondrial_genes.txt")
+counts <- counts %>% mutate(gene=rownames(.)) %>% 
+  dplyr::filter(!rownames(.) %in% MTgenes$V1) %>% dplyr::select(-"gene")
+dim(counts)
+
+# load meta genes to gene name dictionary
+metagene_dict <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/metaidname.txt") %>% select(-id) %>% distinct()
+metagene_dict_collapsed <- metagene_dict %>% group_by(meta) %>% 
+  summarize(source=paste(name,collapse=','))
+head(metagene_dict)
+head(metagene_dict_collapsed)
+
+# how many meta genes in our count table don't exist in the dictionary?
+this_meta <- rownames(counts)[grepl("meta",rownames(counts))]
+length(intersect(this_meta,metagene_dict_collapsed$meta))
+length(this_meta)
+length(unique(metagene_dict_collapsed$meta))
+setdiff(this_meta,metagene_dict_collapsed$meta) # all meta genes in count table exist in meta_dict
+setdiff(metagene_dict_collapsed$meta,this_meta) # 1 meta gene in meta_dict doesn't exist in count table
+```
+
+## compile metadata table
+```{r metadata}
+pip.summary=read.table(paste0(Dir,"/DolphinNext/report10209/summary/overall_summary.tsv"), sep="\t", header=TRUE) %>%
+magrittr::set_colnames(c("sample","total_reads","Multimapped_Reads_Aligned_STAR","Unique_Reads_Aligned_STAR"))
+
+metadata <- data.frame(sample=colnames(counts)) %>%
+  tidyr::separate( . , col=sample, into=c("donor","celltype","condition","project","replicate"), sep="_",remove=FALSE) %>%
+  left_join( . , pip.summary, by="sample")
+
+head(metadata)
+colnames(metadata)
+```
+## Overview of library sizes
+```{r lib-size, echo=F, message=F}
+# library size distribution
+df=data.frame(sample=metadata$sample,total_count=metadata$total_reads,unique_count=metadata$Unique_Reads_Aligned_STAR)
+df=df[order(-df$total_count),]
+plot_ly(y = df$sample,x = df$total_count,type = "bar")
+
+# which libraries have low reads? (<5M) <- this sample didn't have enough first strand product due to pipetting error.
+df$sample[which(df$total_count<5000000)] %>% table()
+```
+## CPM
+```{r cpm}
+col.sum=apply(counts,2,sum)
+CPM=sweep(counts, 2, col.sum, `/`)*1000000
+```
+## PCA
+```{r pca-allsamples}
+logCPM <- log2(CPM + 1) %>% as.data.frame()
+
+# pick genes of top row variance
+mat.logCPM.lnsd <- apply(logCPM,MARGIN=1,FUN=sd)
+mat.logCPM.lncv <- sqrt( (exp(mat.logCPM.lnsd) )^2 -1) #coefficient of variance
+logCPM.top <- logCPM[order(mat.logCPM.lncv,decreasing=T),][1:2000,] 
+
+# PCA
+pca = prcomp(t(logCPM.top),centered= T,scale = T)
+loadings=as.data.frame(pca$rotation)
+
+# percent variance in each pc
+plot(pca)
+pcs = pca$x
+pca.pctVar = pca$sdev^2/sum(pca$sdev^2)
+# PC1 is 55.8%, PC2 is 22.0%, PC3 is 4.9%. top 3 PCs capture 80% of variance.
+
+# plot
+# top PC information
+d=data.frame(PC1=pca$x[,1],PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], PC5=pca$x[,5],PC6=pca$x[,6],sample=rownames(pcs))
+d=left_join(d,metadata,by="sample")
+
+# condition vs donor
+p <- d %>%
+  ggplot(., aes(y=PC1,x=PC2,col=celltype,shape=condition)) + 
+  geom_point(size=3) + 
+  geom_text_repel(aes(label=donor),show.legend = F,size=2,nudge_x=-1,nudge_y=1) + 
+  ylab(sprintf("PC1 (%2.1f%% variance)",100*pca.pctVar[1])) + 
+  xlab(sprintf("PC2 (%2.1f%% variance)",100*pca.pctVar[2])) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  labs(title="skin eQTL 3ctk 01152025 shallow-sequencing \n top2kCOV genes of log2CPM")
+```
+```{r pca-KRTs}
+logCPM <- log2(CPM[,colnames(CPM)[grepl("KRT",colnames(CPM))]] + 1) %>% as.data.frame()
+
+# pick genes of top row variance
+mat.logCPM.lnsd <- apply(logCPM,MARGIN=1,FUN=sd)
+mat.logCPM.lncv <- sqrt(exp((mat.logCPM.lnsd * log(2))^2) - 1)#coefficient of variance
+logCPM.top <- logCPM[order(mat.logCPM.lncv,decreasing=T),][1:2000,] 
+
+# PCA
+pca = prcomp(t(logCPM.top),centered= T,scale = T)
+loadings=as.data.frame(pca$rotation)
+
+# percent variance in each pc
+plot(pca)
+pcs = pca$x
+pca.pctVar = pca$sdev^2/sum(pca$sdev^2)
+# PC1 is 55.8%, PC2 is 17.4%, PC3 is 12.3%. top 3 PCs capture 85% of variance.
+
+# plot
+# top PC information
+d=data.frame(PC1=pca$x[,1],PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], PC5=pca$x[,5],PC6=pca$x[,6],sample=rownames(pcs))
+d=left_join(d,metadata,by="sample")
+
+# condition vs donor
+p <- d %>%
+  ggplot(., aes(y=PC1,x=PC2,col=condition,shape=celltype)) + 
+  geom_point(size=3) + 
+  geom_text_repel(aes(label=donor),show.legend = F,size=2) + 
+  ylab(sprintf("PC1 (%2.1f%% variance)",100*pca.pctVar[1])) + 
+  xlab(sprintf("PC2 (%2.1f%% variance)",100*pca.pctVar[2])) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  labs(title="skin eQTL 3ctk 01152025 shallow-sequencing KRT samples\n top2kCOV genes of log2CPM")
+```
+```{r pca-MELs}
+logCPM <- log2(CPM[,colnames(CPM)[grepl("MEL",colnames(CPM))]] + 1) %>% as.data.frame()
+
+# pick genes of top row variance
+mat.logCPM.lnsd <- apply(logCPM,MARGIN=1,FUN=sd)
+mat.logCPM.lncv <- sqrt(exp((mat.logCPM.lnsd * log(2))^2) - 1)#coefficient of variance
+logCPM.top <- logCPM[order(mat.logCPM.lncv,decreasing=T),][1:2000,] 
+
+# PCA
+pca = prcomp(t(logCPM.top),centered= T,scale = T)
+loadings=as.data.frame(pca$rotation)
+
+# percent variance in each pc
+plot(pca)
+pcs = pca$x
+pca.pctVar = pca$sdev^2/sum(pca$sdev^2)
+# PC1 is 48.3%, PC2 is 23.2%, PC3 is 12.1%. top 3 PCs capture 84% of variance.
+
+# plot
+# top PC information
+d=data.frame(PC1=pca$x[,1],PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], PC5=pca$x[,5],PC6=pca$x[,6],sample=rownames(pcs))
+d=left_join(d,metadata,by="sample")
+
+# condition vs donor
+p <- d %>%
+  ggplot(., aes(y=PC1,x=PC2,col=condition,shape=celltype)) + 
+  geom_point(size=3) + 
+  geom_text_repel(aes(label=donor),show.legend = F,size=2) + 
+  ylab(sprintf("PC1 (%2.1f%% variance)",100*pca.pctVar[1])) + 
+  xlab(sprintf("PC2 (%2.1f%% variance)",100*pca.pctVar[2])) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  labs(title="skin eQTL 3ctk 01152025 shallow-sequencing MEL samples\n top2kCOV genes of log2CPM")
+```
+```{r pca-FRBs}
+logCPM <- log2(CPM[,colnames(CPM)[grepl("FRB",colnames(CPM))]] + 1) %>% as.data.frame()
+
+# pick genes of top row variance
+mat.logCPM.lnsd <- apply(logCPM,MARGIN=1,FUN=sd)
+mat.logCPM.lncv <- sqrt(exp((mat.logCPM.lnsd * log(2))^2) - 1) #coefficient of variance
+logCPM.top <- logCPM[order(mat.logCPM.lncv,decreasing=T),][1:2000,] 
+
+# PCA
+pca = prcomp(t(logCPM.top),centered= T,scale = T)
+loadings=as.data.frame(pca$rotation)
+
+# percent variance in each pc
+plot(pca)
+pcs = pca$x
+pca.pctVar = pca$sdev^2/sum(pca$sdev^2)
+# PC1 is 37.4%, PC2 is 20.9%, PC3 is 18.2%. top 4 PCs capture 87% of variance.
+
+# plot
+# top PC information
+d=data.frame(PC1=pca$x[,1],PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], PC5=pca$x[,5],PC6=pca$x[,6],sample=rownames(pcs))
+d=left_join(d,metadata,by="sample")
+
+# condition vs donor
+p <- d %>%
+  ggplot(., aes(y=PC1,x=PC2,col=condition,shape=celltype)) + 
+  geom_point(size=3) + 
+  geom_text_repel(aes(label=donor),show.legend = F,size=2) + 
+  ylab(sprintf("PC1 (%2.1f%% variance)",100*pca.pctVar[1])) + 
+  xlab(sprintf("PC2 (%2.1f%% variance)",100*pca.pctVar[2])) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  labs(title="skin eQTL 3ctk 01152025 shallow-sequencing FRB samples\n top2kCOV genes of log2CPM")
+```
+## heatmap of cytokine signature genes
+```{r heatmap-KRT-cytokine-signature-genes}
+# signature gene set
+# IFNB: 2,4,9, IFNG: 7, TNF: 6
+signature_table <- data.table::fread("~/Dropbox (UMass Medical School)/chemokine_data/mg/KRT_Stims/KRT_signature_summary_with_assignment.csv") %>%
+  dplyr::filter(gene %in% rownames(CPM)) %>%
+  arrange(Cluster)
+
+#### make log2CPM matrix #### 
+metadata$condition <- ordered(metadata$condition, levels=c("PBS","IFNB","IFNG","TNF"))
+ordered_indices <- order(metadata$celltype, metadata$condition, metadata$donor)
+metadata.ordered <- metadata[ordered_indices, ]
+
+CPM_ordered <- CPM[signature_table$gene, metadata.ordered$sample]
+log2CPM_ordered <- log2(CPM_ordered + 1)
+
+zerovar.col <- apply(log2CPM_ordered, 1, var) == 0
+logCPM.keep <- log2CPM_ordered[!zerovar.col,]
+
+# perform k-means-clustering to determine k_row.
+df <- log2CPM_ordered
+wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+#### niceKmeans #### 
+km_res <- niceKmeans(df, 4)
+split_instructions <- signature_table$Cluster
+zlogCPM.heatmap <- km_res$clustered %>% dplyr::select(-class)
+
+#### heatmap #### 
+column_ha = HeatmapAnnotation(
+  celltype = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  condition = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  donor = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[1]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFNB" = "#dbfc03", "IFNG" = "#fc036f","TNF" = "#228B22"),
+             celltype = c("MEL" = "brown", "KRT" = "#0AFFFB", "FRB" = "#A239CA")),
+  annotation_name_side = "left")
+
+pdf(paste0(Dir,"/analysis/heatmap_KRT_signature_genes.pdf"))
+p <- draw(Heatmap(as.matrix(zlogCPM.heatmap), 
+        name = "z-score log2CPM",
+        top_annotation = column_ha,
+        column_title = "skin-eQTL-3ctk project: 01152025 shallow sequencing result \n KRT signature genes",
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        column_split = c(rep(1,8),rep(2,8),rep(3,8)),
+        row_split = split_instructions, 
+        show_row_names = TRUE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(1, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 5),
+        row_names_gp = gpar(fontsize = 2),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold")))
+dev.off()
+```
+```{r heatmap-FRB-cytokine-signature-genes}
+# signature gene set
+signature_table <- data.table::fread("~/Dropbox (UMass Medical School)/chemokine_data/mg/FBR_Stims/FBR_signature_summary_with_assignment.csv") %>%
+  dplyr::filter(gene %in% rownames(CPM)) %>%
+  arrange(Cluster)
+
+#### make log2CPM matrix #### 
+metadata$condition <- ordered(metadata$condition, levels=c("PBS","IFNB","IFNG","TNF"))
+ordered_indices <- order(metadata$celltype, metadata$condition, metadata$donor)
+metadata.ordered <- metadata[ordered_indices, ]
+
+CPM_ordered <- CPM[signature_table$gene, metadata.ordered$sample]
+log2CPM_ordered <- log2(CPM_ordered + 1)
+
+zerovar.col <- apply(log2CPM_ordered, 1, var) == 0
+logCPM.keep <- log2CPM_ordered[!zerovar.col,]
+
+# perform k-means-clustering to determine k_row.
+df <- log2CPM_ordered
+wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+#### niceKmeans #### 
+km_res <- niceKmeans(df, 4)
+split_instructions <- signature_table$Cluster
+zlogCPM.heatmap <- km_res$clustered %>% dplyr::select(-class)
+
+#### heatmap #### 
+column_ha = HeatmapAnnotation(
+  celltype = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  condition = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  donor = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[1]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFNB" = "#dbfc03", "IFNG" = "#fc036f","TNF" = "#228B22"),
+             celltype = c("MEL" = "brown", "KRT" = "#0AFFFB", "FRB" = "#A239CA")),
+  annotation_name_side = "left")
+
+pdf(paste0(Dir,"/analysis/heatmap_FRB_signature_genes.pdf"))
+p <- draw(Heatmap(as.matrix(zlogCPM.heatmap), 
+        name = "z-score log2CPM",
+        top_annotation = column_ha,
+        column_title = "skin-eQTL-3ctk project: 01152025 shallow sequencing result \n FRB signature genes",
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        column_split = c(rep(1,8),rep(2,8),rep(3,8)),
+        row_split = split_instructions, 
+        show_row_names = TRUE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(1, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 5),
+        row_names_gp = gpar(fontsize = 2),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold")))
+dev.off()
+```
+## GSVA
+### GSVA
+```{r gsva-tutorial}
+# GSVA example
+library(limma)
+p <- 10 ## number of genes
+n <- 30 ## number of samples
+nGrp1 <- 15 ## number of samples in group 1
+nGrp2 <- n - nGrp1 ## number of samples in group 2
+
+## consider three disjoint gene sets
+geneSets <- list(set1=paste("g", 1:3, sep=""),
+                 set2=paste("g", 4:6, sep=""),
+                 set3=paste("g", 7:10, sep=""))
+## sample data from a normal distribution with mean 0 and st.dev. 1
+y <- matrix(rnorm(n*p), nrow=p, ncol=n,
+            dimnames=list(paste("g", 1:p, sep="") , paste("s", 1:n, sep="")))
+## genes in set1 are expressed at higher levels in the last 'nGrp1+1' to 'n' samples
+y[geneSets$set1, (nGrp1+1):n] <- y[geneSets$set1, (nGrp1+1):n] + 2
+
+## build design matrix
+design <- cbind(sampleGroup1=1, sampleGroup2vs1=c(rep(0, nGrp1), rep(1, nGrp2)))
+## fit linear model
+fit <- lmFit(y, design)
+## estimate moderated t-statistics
+fit <- eBayes(fit)
+## genes in set1 are differentially expressed
+topTable(fit, coef="sampleGroup2vs1")
+
+## build GSVA parameter object
+gsvapar <- gsvaParam(y, geneSets, maxDiff=TRUE)
+## estimate GSVA enrichment scores for the three sets
+gsva_es <- gsva(gsvapar)
+## fit the same linear model now to the GSVA enrichment scores
+fit <- lmFit(gsva_es, design)
+## estimate moderated t-statistics
+fit <- eBayes(fit)
+## set1 is differentially expressed
+topTable(fit, coef="sampleGroup2vs1")
+```
+```{r gsva-MEL-HallmarkGeneSet}
+library(GSVA)
+library(msigdbdf)
+library(limma)
+
+##### metadata ####
+metadata$celltype <- factor(metadata$celltype, levels = c("FRB","KRT","MEL"))
+metadata$condition <- factor(metadata$condition, levels = c("PBS", "IFNG", "IFNB", "TNF"))
+metadata$donor <- factor(metadata$donor, levels = c("F52", "F113"))
+metadata <- metadata %>% arrange(celltype,condition, donor)
+rownames(metadata) <- metadata$sample
+
+##### expression matrix ####
+CPM <- CPM[,metadata$sample]
+logCPM.mel <- log2(CPM + 1) %>% dplyr::select(contains("MEL")) %>% as.matrix
+
+##### prepare gene sets ####
+hallmark_sets <- msigdbdf(target_species = "HS") %>% dplyr::filter(gs_collection_name=="Hallmark")
+gs_list <- split(hallmark_sets$db_gene_symbol, hallmark_sets$gs_name)
+
+##### build GSVA parameter object then run GSVA
+gsvaparamter <- gsvaParam(logCPM.mel, gs_list, maxDiff=TRUE)
+gsva_results <- gsva(gsvaparamter)
+
+#### run FIRST Limma. design matrix. fit linear model. make DE. ####
+# --> this tests for DEGs.
+metadata.mel <- metadata[which(metadata$celltype=="MEL"),]
+rownames(metadata.mel) <- metadata.mel$sample
+design <- model.matrix( ~ 0 + condition + donor, data = metadata.mel)
+colnames(design)
+fit <- lmFit(logCPM.mel, design)
+contrast.matrix <- makeContrasts(
+  IFNB_vs_PBS = conditionIFNB - conditionPBS,
+  IFNG_vs_PBS = conditionIFNG - conditionPBS,
+  TNF_vs_PBS = conditionTNF - conditionPBS,
+  IFNB_vs_IFNG = conditionIFNB - conditionIFNG,
+  TNF_vs_IFNG = conditionTNF - conditionIFNG,
+  TNF_vs_IFNB = conditionTNF - conditionIFNB,
+  levels = design
+)
+#fit2 <- contrasts.fit(fit, contrast.matrix)
+#fit2 <- eBayes(fit2)
+#top_ifng <- topTable(fit2, coef = "IFNG_vs_PBS", number = Inf)
+#top_ifnb <- topTable(fit2, coef = "IFNB_vs_PBS", number = Inf)
+#top_tnf <- topTable(fit2, coef = "TNF_vs_PBS", number = Inf)
+
+#### run SECOND Limma. ####
+#--> this tests which pathways are DE.
+# double check sample ordering. 
+all(colnames(gsva_results) == rownames(metadata.mel))
+# apply limma to GSVA scores
+fit_gsva <- lmFit(gsva_results, design)
+fit_gsva2 <- contrasts.fit(fit_gsva, contrast.matrix)
+fit_gsva2 <- eBayes(fit_gsva2)
+# extract pathway_level DE results
+top_gsva_ifng <- topTable(fit_gsva2, coef = "IFNG_vs_PBS", number = Inf)
+top_gsva_ifnb <- topTable(fit_gsva2, coef = "IFNB_vs_PBS", number = Inf)
+top_gsva_tnf <- topTable(fit_gsva2, coef = "TNF_vs_PBS", number = Inf)
+top_gsva_ifnb_v_ifng <- topTable(fit_gsva2, coef = "IFNB_vs_IFNG", number = Inf)
+top_gsva_tnf_v_ifng <- topTable(fit_gsva2, coef = "TNF_vs_IFNG", number = Inf)
+top_gsva_tnf_v_ifnb <- topTable(fit_gsva2, coef = "TNF_vs_IFNB", number = Inf)
+```
+```{r gsva-MEL-HallmarkGeneSet-heatmap}
+library(ComplexHeatmap)
+library(circlize)
+
+# Optional: scale the GSVA scores across gene sets (rows)
+gsva_scaled <- t(scale(t(gsva_results)))  # rows = gene sets
+
+# Make column annotation (conditions, optional donor)
+ha_col <- HeatmapAnnotation(
+  Celltype = metadata.mel$celltype,
+  Condition = metadata.mel$condition,
+  Donor = metadata.mel$donor,
+  col = list(
+    Celltype = c(FRB = "white", KRT = "blue", MEL = "black"),
+    Condition = c(PBS = "#8c8c8c", IFNG = "#f8766d", IFNB = "#00bfc4", TNF = "#7cae00"),
+    Donor = c(F113 = "brown", F52 = "darkred")
+  ),
+  annotation_legend_param = list(
+    Celltype = list(title = "celltype"),
+    Condition = list(title = "Condition"),
+    Donor = list(title = "Donor")
+  )
+)
+
+# Make the heatmap
+Heatmap(gsva_scaled,
+        name = "GSVA score",
+        top_annotation = ha_col,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        row_names_gp = gpar(fontsize = 4),
+        column_names_gp = gpar(fontsize = 4),
+        column_names_rot = 45,
+        heatmap_legend_param = list(title = "Scaled GSVA Score"))
+
+```
+```{r gsva-MEL-customGeneSet}
+library(GSVA)
+library(msigdbdf)
+library(limma)
+
+##### expression matrix ####
+logCPM.mel <- log2(CPM + 1) %>% dplyr::select(contains("MEL")) %>% as.matrix
+
+##### prepare gene sets ####
+mel_gs1 <- read.csv("~/Dropbox (UMass Medical School)/chemokine_data/Melanocytes_Crystal/Heatmap/melanocytes1.txt", header=F)$V1
+mel_gs2 <- read.csv("~/Dropbox (UMass Medical School)/chemokine_data/Melanocytes_Crystal/Heatmap/melanocytes2.txt", header=F)$V1
+mel_gs3 <- read.csv("~/Dropbox (UMass Medical School)/chemokine_data/Melanocytes_Crystal/Heatmap/melanocytes3.txt", header=F)$V1
+mel_gs4 <- read.csv("~/Dropbox (UMass Medical School)/chemokine_data/Melanocytes_Crystal/Heatmap/melanocytes4.txt", header=F)$V1
+custom_gene_sets <- list(
+  MEL_GS1 = mel_gs1,
+  MEL_GS2 = mel_gs2,
+  MEL_GS3 = mel_gs3,
+  MEL_GS4 = mel_gs4
+)
+
+##### prepare gene sets ####
+DC1<-c("CLEC9A", "XCR1", "BATF3", "IRF8", "CADM1", "TLR3","LILRA4","IDO1")
+DC2<-c( "FCER1A", "IRF4", "CD11b", "CLEC10A", "SIRPA", "CD301","ITGAM","ITGAX","FCER1A","CD1C")  # DC2 (cDC2)
+#pDCs<-c("IRF7", "TCF4", "LILRA4", "BST2", "IL3RA", "SIGLEC-H", "NRP1", "BDCA2")  # pDC
+Migratory<-c("CCR7", "LAMP3", "IDO1", "CD86", "CD40", "CCL19", "CCL22", "CD83")
+moDCs <-c("CD14", "LYZ", "FCGR3A", "CD1A", "CD1b", "CD209", "MERTK", "ITGAX","IRF7","CD14","FCGR3A","MAFB","MAF","CD209","TREM2")
+LC<-c("CD1A","CD207","HLA-DQB2","FCGBP","CSF1R")
+MC_Tol<-c("CXCL9","GBP1","IDO1","CD274","NECTIN2","CCR7")
+custom_gene_sets <- list(
+  DC1 = DC1,
+  DC2 = DC2,
+  Migratory = Migratory,
+  moDCs = moDCs,
+  LC = LC,
+  MC_Tol =MC_Tol
+)
+
+##### build GSVA parameter object then run GSVA
+gsvaparamter <- gsvaParam(logCPM.mel, custom_gene_sets, maxDiff=TRUE)
+gsva_results <- gsva(gsvaparamter)
+
+#### run FIRST Limma. design matrix. fit linear model. make DE. ####
+# --> this tests for DEGs.
+metadata.mel <- metadata[which(metadata$celltype=="MEL"),]
+metadata.mel <- metadata.mel[match(colnames(logCPM.mel), metadata.mel$sample), ]
+rownames(metadata.mel) <- metadata.mel$sample
+design <- model.matrix( ~ 0 + condition + donor, data = metadata.mel)
+colnames(design)
+fit <- lmFit(logCPM.mel, design)
+contrast.matrix <- makeContrasts(
+  IFNB_vs_PBS = conditionIFNB - conditionPBS,
+  IFNG_vs_PBS = conditionIFNG - conditionPBS,
+  TNF_vs_PBS = conditionTNF - conditionPBS,
+  levels = design
+)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+top_ifng <- topTable(fit2, coef = "IFNG_vs_PBS", number = Inf)
+top_ifnb <- topTable(fit2, coef = "IFNB_vs_PBS", number = Inf)
+top_tnf <- topTable(fit2, coef = "TNF_vs_PBS", number = Inf)
+
+#### run SECOND Limma. ####
+#--> this tests which pathways are DE.
+# double check sample ordering. 
+all(colnames(gsva_results) == rownames(metadata.mel))
+# apply limma to GSVA scores
+fit_gsva <- lmFit(gsva_results, design)
+fit_gsva2 <- contrasts.fit(fit_gsva, contrast.matrix)
+fit_gsva2 <- eBayes(fit_gsva2)
+# extract pathway_level DE results
+top_gsva_ifng <- topTable(fit_gsva2, coef = "IFNG_vs_PBS", number = Inf)
+top_gsva_ifnb <- topTable(fit_gsva2, coef = "IFNB_vs_PBS", number = Inf)
+top_gsva_tnf <- topTable(fit_gsva2, coef = "TNF_vs_PBS", number = Inf)
+```
+```{r gsva-MEL-customGeneSet-heatmap}
+library(ComplexHeatmap)
+library(circlize)
+
+# Make sure sample order matches metadata
+metadata.mel$condition <- factor(metadata.mel$condition, levels = c("PBS", "IFNG", "IFNB", "TNF"))
+metadata.mel$donor <- factor(metadata.mel$donor, levels = c("F52", "F113"))
+metadata.mel <- metadata.mel %>% arrange(condition, donor)
+gsva_results <- gsva_results[, metadata.mel$sample]
+
+# Optional: scale the GSVA scores across gene sets (rows)
+gsva_scaled <- t(scale(t(gsva_results)))  # rows = gene sets
+
+# Make column annotation (conditions, optional donor)
+ha_col <- HeatmapAnnotation(
+  Condition = metadata.mel$condition,
+  Donor = metadata.mel$donor,
+  col = list(
+    Condition = c(PBS = "#8c8c8c", IFNG = "#f8766d", IFNB = "#00bfc4", TNF = "#7cae00"),
+    Donor = c(F113 = "brown", F52 = "darkred")
+  ),
+  annotation_legend_param = list(
+    Condition = list(title = "Condition"),
+    Donor = list(title = "Donor")
+  )
+)
+
+# Make the heatmap
+Heatmap(gsva_scaled,
+        name = "GSVA score",
+        top_annotation = ha_col,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        row_names_gp = gpar(fontsize = 9),
+        column_names_gp = gpar(fontsize = 9),
+        heatmap_legend_param = list(title = "Scaled GSVA Score"))
+
+```
+```{r gsva-MEL-customGeneSet-bubbleplot}
+library(ComplexHeatmap)
+library(circlize)
+
+top_gsva_ifng <- topTable(fit_gsva2, coef = "IFNG_vs_PBS", number = Inf) %>% 
+  as.data.frame() %>% mutate(cytokine="IFNG") %>% rownames_to_column("gene_set")
+top_gsva_ifnb <- topTable(fit_gsva2, coef = "IFNB_vs_PBS", number = Inf) %>% 
+  as.data.frame() %>% mutate(cytokine="IFNB") %>% rownames_to_column("gene_set")
+top_gsva_tnf <- topTable(fit_gsva2, coef = "TNF_vs_PBS", number = Inf) %>% 
+  as.data.frame() %>% mutate(cytokine="TNF") %>% rownames_to_column("gene_set")
+
+top_gsva <- rbind(top_gsva_ifng, top_gsva_ifnb, top_gsva_tnf)
+
+ggplot(top_gsva, aes(x=cytokine, y=-log10(adj.P.Val))) +
+  geom_jitter(aes(color = gene_set, size = logFC), width=0.2)
+
+ggplot(top_gsva, aes(x=gene_set, y=-log10(adj.P.Val))) +
+  geom_jitter(aes(color = cytokine, size = logFC), width=0.2)
+  
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

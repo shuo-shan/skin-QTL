@@ -1,0 +1,874 @@
+---
+title: "DEgenes_heatmap"
+author: "Shuo Shan"
+date: "01/05/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Load packages  
+```{r package, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(gridExtra)
+library(ggpubr)
+library(plotly)
+library(RCurl)
+library(ComplexHeatmap)
+
+Dir="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/heatmap"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment.RData'))
+load(paste0(Dir,'/myEnvironment.RData'))
+```
+  
+## Load batch-corrected CPM, metadata, and DEseq2 results for all samples
+```{r load-CPM}
+dir.krt <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/keratinocytes/pipeline_11192022/analysis"
+dir.mel <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/melanocytes/pipeline_12022022/analysis"
+dir.frb <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/fibroblasts/pipeline_11192022/analysis"
+
+CPM_PBS.krt <- read.table(paste0(dir.krt,"/CPM_PBS.txt"),header=TRUE,sep="\t")
+CPM_IFN.krt <- read.table(paste0(dir.krt,"/CPM_IFN.txt"),header=TRUE,sep="\t")
+CPM_PBS.mel <- read.table(paste0(dir.mel,"/CPM_PBS.txt"),header=TRUE,sep="\t")
+CPM_IFN.mel <- read.table(paste0(dir.mel,"/CPM_IFN.txt"),header=TRUE,sep="\t")
+CPM_PBS.frb <- read.table(paste0(dir.frb,"/CPM_PBS.txt"),header=TRUE,sep="\t")
+CPM_IFN.frb <- read.table(paste0(dir.frb,"/CPM_IFN.txt"),header=TRUE,sep="\t")
+
+CPM_PBS.krt <- CPM_PBS.krt[,sort(colnames(CPM_PBS.krt))]
+CPM_IFN.krt <- CPM_IFN.krt[,sort(colnames(CPM_IFN.krt))]
+CPM_PBS.mel <- CPM_PBS.mel[,sort(colnames(CPM_PBS.mel))]
+CPM_IFN.mel <- CPM_IFN.mel[,sort(colnames(CPM_IFN.mel))]
+CPM_PBS.frb <- CPM_PBS.frb[,sort(colnames(CPM_PBS.frb))]
+CPM_IFN.frb <- CPM_IFN.frb[,sort(colnames(CPM_IFN.frb))]
+
+colnames(CPM_PBS.krt) <- colnames(CPM_PBS.krt) %>% gsub("$","_PBS_KRT",.)
+colnames(CPM_IFN.krt) <- colnames(CPM_IFN.krt) %>% gsub("$","_IFN_KRT",.)
+colnames(CPM_PBS.mel) <- colnames(CPM_PBS.mel) %>% gsub("$","_PBS_MEL",.)
+colnames(CPM_IFN.mel) <- colnames(CPM_IFN.mel) %>% gsub("$","_IFN_MEL",.)
+colnames(CPM_PBS.frb) <- colnames(CPM_PBS.frb) %>% gsub("$","_PBS_FRB",.)
+colnames(CPM_IFN.frb) <- colnames(CPM_IFN.frb) %>% gsub("$","_IFN_FRB",.)
+
+CPM <- cbind(CPM_PBS.krt,CPM_IFN.krt,CPM_PBS.mel,CPM_IFN.mel,CPM_PBS.frb,CPM_IFN.frb)
+```
+```{r load-metadata}
+metadata.krt <- read.table(paste0(dir.krt,"/metadata.txt"),header=TRUE,sep="\t")
+metadata.mel <- read.table(paste0(dir.mel,"/metadata.txt"),header=TRUE,sep="\t")
+metadata.frb <- read.table(paste0(dir.frb,"/metadata.txt"),header=TRUE,sep="\t")
+```
+```{r load-DESeq2-results}
+res.krt <- read.table(paste0(dir.krt,"/DESeq2_results_IFNvsPBS.txt"),header=T,sep=" ") %>% na.omit()
+res.mel <- read.table(paste0(dir.mel,"/DESeq2_results_IFNvsPBS.txt"),header=T,sep=" ") %>% na.omit()
+res.frb <- read.table(paste0(dir.frb,"/DESeq2_results_IFNvsPBS.txt"),header=T,sep=" ") %>% na.omit()
+```
+```{r compute-log2FC}
+log2FC.krt <- log2( (CPM_IFN.krt + 1) / (CPM_PBS.krt + 1))
+log2FC.mel <- log2( (CPM_IFN.mel + 1) / (CPM_PBS.mel + 1))
+log2FC.frb <- log2( (CPM_IFN.frb + 1) / (CPM_PBS.frb + 1))
+
+colnames(log2FC.krt) <- colnames(log2FC.krt) %>% gsub("_IFN","",.)
+colnames(log2FC.mel) <- colnames(log2FC.mel) %>% gsub("_IFN","",.)
+colnames(log2FC.frb) <- colnames(log2FC.frb) %>% gsub("_IFN","",.)
+
+log2FC <- cbind(log2FC.krt,log2FC.mel,log2FC.frb)
+```
+## Compile a list of DE genes
+```{r DEG}
+DEG <- unique(c(res.krt[which(res.krt$padj<0.05 & abs(res.krt$log2FoldChange)>1.5),"gene"],
+                res.mel[which(res.mel$padj<0.05 & abs(res.mel$log2FoldChange)>1.5),"gene"],
+                res.frb[which(res.frb$padj<0.05 & abs(res.frb$log2FoldChange)>1.5),"gene"]))
+```
+## Write to file
+```{r write}
+write.table(CPM, file=paste0(rna_dir,"/CPM_3cts.txt"), quote=F, sep="\t", row.names=T, col.names=T)
+```
+## Heatmap
+```{r heatmap-DEgenes-CPM-kegg-rowClustered-kmm-hclust}
+# 1. center and scale data
+CPM <- cbind(CPM_PBS.krt,CPM_IFN.krt,CPM_PBS.mel,CPM_IFN.mel,CPM_PBS.frb,CPM_IFN.frb)
+CPM <- CPM[DEG,]
+CPM <- CPM[rowMeans(CPM)>=10,] %>% na.omit()
+logCPM <- log2(CPM + 1)
+
+# 2. hierarchially cluster K-means clusters
+# perform k-means-clustering to determine k_row.
+df <- logCPM
+wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+# useful function
+niceKmeans <-function (df, k, kmeans.algorithm = "Lloyd", iter.max = 1000, nstart=100) {
+  
+  result = data.frame();
+  source = t(scale(t(df)));
+  kmeans = kmeans(source, centers = k, iter.max = iter.max, algorithm=kmeans.algorithm, nstart=nstart);
+  clustered = data.frame();
+  breaks = c();
+  for (i in 1:k) {
+    print(sprintf("Doing cluster %i",i))
+    cluster = source[kmeans$cluster==i,];
+    rows = row.names(cluster);
+    clust = heatmap.2(as.matrix(cluster), distfun=function(x) as.dist((1-cor(t(x)))/2))
+    cluster.ordered = cluster[clust$rowInd,];
+    cluster.ordered.genes = rows[clust$rowInd];
+    row.names(cluster.ordered) = cluster.ordered.genes;
+    class = data.frame(row.names=cluster.ordered.genes);
+    class[,"class"] = i 
+    cluster.ordered = cbind(cluster.ordered, class);
+    clustered = rbind(clustered, cluster.ordered);
+    if(i > 1 & i < k) {
+      breaks[i] = as.numeric(breaks[i-1]) + length(rows);
+    } else if(i==1) {
+      breaks[i] = length(rows);
+    }
+  }
+  
+  result <- list();
+  result$clustered <- clustered;
+  result$breaks <- breaks;
+  return(result);
+}
+
+km_res <- niceKmeans(logCPM, 5)
+# split_instructions <- c(rep(1,km_res$breaks[1]), rep(2,km_res$breaks[2]-km_res$breaks[1]),
+#                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+#                        rep(6,nrow(km_res$clustered)-km_res$breaks[5]))
+# split_instructions <- c(rep(1,km_res$breaks[1]), rep(2,km_res$breaks[2]-km_res$breaks[1]),
+#                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+#                        rep(6,km_res$breaks[6]-km_res$breaks[5]),
+#                        rep(7,nrow(km_res$clustered)-km_res$breaks[6]))
+split_instructions <- c(rep(1,km_res$breaks[1]), rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                       rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                       rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                       rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+zlogCPM.heatmap <- km_res$clustered[,1:ncol(CPM)]
+
+# 4. load genes of interest
+genes_vit_MEL_up <- read.table("~/Downloads/nl/human/skin/eQTLs/literature/Yuqing_vitiligo/MEL_Vitiligo_lesion-vs-control_DEgenes_upregulated.txt") %>% mutate(keyword=rep("vitiligo_MEL_up",nrow(.))) %>% dplyr::select(c("V1","keyword"))
+genes_vit_KRT_up <- read.table("~/Downloads/nl/human/skin/eQTLs/literature/Yuqing_vitiligo/KRT_Vitiligo_lesion-vs-control_DEgenes_upregulated.txt") %>% mutate(keyword=rep("vitiligo_KRT_up",nrow(.))) %>% dplyr::select(c("V1","keyword"))
+genes_adhesion <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/GO0016337_cell-cell-adhesion.txt") %>% mutate(keyword=rep("adhesion",nrow(.)))
+genes_longevity <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04211_KEGG-longevity-regulating-pathway.txt") %>% mutate(keyword=rep("longevity",nrow(.)))
+genes_TGFBsignaling <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/M2642_KEGG-TGF-beta-signaling-pathway.txt") %>% mutate(keyword=rep("TGFB",nrow(.)))
+genes_apoptosis <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04210_KEGG-apoptosis.txt") %>% mutate(keyword=rep("apoptosis",nrow(.)))
+genes_hippo <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04390_KEGG-hippo.txt") %>% mutate(keyword=rep("hippo",nrow(.)))
+genes_autophagy <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04140_KEGG-autophagy.txt") %>% mutate(keyword=rep("autophagy",nrow(.)))
+genes_ROS <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa05208_KEGG-ROS.txt") %>% mutate(keyword=rep("ROS",nrow(.)))
+
+genes_kegg <- rbind(genes_vit_MEL_up, genes_vit_KRT_up,genes_adhesion, genes_longevity, genes_TGFBsignaling, genes_apoptosis, genes_hippo, genes_autophagy, genes_ROS) %>% group_by(V1) %>% summarize(keyword=paste(keyword,collapse=','))
+
+zlogCPM.heatmap_with_genes_kegg <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% genes_kegg$V1)
+
+genes_kegg <- genes_kegg %>% dplyr::filter(V1 %in% rownames(zlogCPM.heatmap_with_genes_kegg)) %>% mutate(label=paste0(V1,": ",keyword))
+rownames(genes_kegg) <- genes_kegg$V1
+
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_genes_kegg))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+row_anno_label2 <- genes_kegg[row_anno_label,]$label
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  celltype = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label2,
+                  which="row",
+                  labels_gp = gpar(fontsize=6),
+                  padding=unit(0.5,"mm")))
+pdf(paste0(Dir,"/heatmap_RNAseq_expressed_DEgenes_5kmm-hc.pdf"),width=24,height=30)
+Heatmap(zlogCPM.heatmap, 
+        name = "z-score log2CPM",
+        top_annotation = column_ha,
+        right_annotation = row_ha,
+        column_title = "DE genes in 3 celltypes, control vs IGNg stimulated, KEGG genes labeled",
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        column_split = c(rep(1,ncol(CPM_PBS.krt)), rep(2,ncol(CPM_IFN.krt)), rep(3,ncol(CPM_PBS.mel)), rep(4,ncol(CPM_IFN.mel)), rep(5,ncol(CPM_PBS.frb)),rep(6,ncol(CPM_IFN.frb))),
+        row_split = split_instructions, 
+        show_row_names = FALSE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = FALSE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+dev.off()
+```
+```{r heatmap-DEgenes-log2FC-kegg-rowClustered-kmm-hclust}
+# 1. center and scale data
+expressedGenes <- rownames(CPM[rowMeans(CPM)>=10,])
+log2FC <- cbind(log2FC.krt,log2FC.mel,log2FC.frb)
+log2FC <- log2FC[DEG,]
+log2FC <- log2FC[expressedGenes,] %>% na.omit()
+
+# 2. hierarchially cluster K-means clusters
+# perform k-means-clustering to determine k_row.
+df <- log2FC
+wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+# useful function
+niceKmeans <-function (df, k, kmeans.algorithm = "Lloyd", iter.max = 1000, nstart=100) {
+  
+  result = data.frame();
+  source = t(scale(t(df)));
+  kmeans = kmeans(source, centers = k, iter.max = iter.max, algorithm=kmeans.algorithm, nstart=nstart);
+  clustered = data.frame();
+  breaks = c();
+  for (i in 1:k) {
+    print(sprintf("Doing cluster %i",i))
+    cluster = source[kmeans$cluster==i,];
+    rows = row.names(cluster);
+    clust = heatmap.2(as.matrix(cluster), distfun=function(x) as.dist((1-cor(t(x)))/2))
+    cluster.ordered = cluster[clust$rowInd,];
+    cluster.ordered.genes = rows[clust$rowInd];
+    row.names(cluster.ordered) = cluster.ordered.genes;
+    class = data.frame(row.names=cluster.ordered.genes);
+    class[,"class"] = i 
+    cluster.ordered = cbind(cluster.ordered, class);
+    clustered = rbind(clustered, cluster.ordered);
+    if(i > 1 & i < k) {
+      breaks[i] = as.numeric(breaks[i-1]) + length(rows);
+    } else if(i==1) {
+      breaks[i] = length(rows);
+    }
+  }
+  
+  result <- list();
+  result$clustered <- clustered;
+  result$breaks <- breaks;
+  return(result);
+}
+
+km_res <- niceKmeans(log2FC, 5)
+# split_instructions <- c(rep(1,km_res$breaks[1]), rep(2,km_res$breaks[2]-km_res$breaks[1]),
+#                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+#                        rep(6,nrow(km_res$clustered)-km_res$breaks[5]))
+# split_instructions <- c(rep(1,km_res$breaks[1]), rep(2,km_res$breaks[2]-km_res$breaks[1]),
+#                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+#                        rep(6,km_res$breaks[6]-km_res$breaks[5]),
+#                        rep(7,nrow(km_res$clustered)-km_res$breaks[6]))
+split_instructions <- c(rep(1,km_res$breaks[1]), rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                       rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                       rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                       rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+zlog2FC.heatmap <- km_res$clustered[,1:ncol(log2FC)]
+
+# 4. load genes of interest
+genes_vit_MEL_up <- read.table("~/Downloads/nl/human/skin/eQTLs/literature/Yuqing_vitiligo/MEL_Vitiligo_lesion-vs-control_DEgenes_upregulated.txt") %>% mutate(keyword=rep("vitiligo_MEL_up",nrow(.))) %>% dplyr::select(c("V1","keyword"))
+genes_vit_KRT_up <- read.table("~/Downloads/nl/human/skin/eQTLs/literature/Yuqing_vitiligo/KRT_Vitiligo_lesion-vs-control_DEgenes_upregulated.txt") %>% mutate(keyword=rep("vitiligo_KRT_up",nrow(.))) %>% dplyr::select(c("V1","keyword"))
+genes_adhesion <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/GO0016337_cell-cell-adhesion.txt") %>% mutate(keyword=rep("adhesion",nrow(.)))
+genes_longevity <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04211_KEGG-longevity-regulating-pathway.txt") %>% mutate(keyword=rep("longevity",nrow(.)))
+genes_TGFBsignaling <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/M2642_KEGG-TGF-beta-signaling-pathway.txt") %>% mutate(keyword=rep("TGFB",nrow(.)))
+genes_apoptosis <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04210_KEGG-apoptosis.txt") %>% mutate(keyword=rep("apoptosis",nrow(.)))
+genes_hippo <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04390_KEGG-hippo.txt") %>% mutate(keyword=rep("hippo",nrow(.)))
+genes_autophagy <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04140_KEGG-autophagy.txt") %>% mutate(keyword=rep("autophagy",nrow(.)))
+genes_ROS <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa05208_KEGG-ROS.txt") %>% mutate(keyword=rep("ROS",nrow(.)))
+genes_kegg <- rbind(genes_vit_MEL_up, genes_vit_KRT_up,genes_adhesion, genes_longevity, genes_TGFBsignaling, genes_apoptosis, genes_hippo, genes_autophagy, genes_ROS) %>% group_by(V1) %>% summarize(keyword=paste(keyword,collapse=','))
+#genes_kegg <- rbind(genes_vit_MEL_up, genes_vit_KRT_up) %>% group_by(V1) %>% summarize(keyword=paste(keyword,collapse=','))
+
+zlog2FC.heatmap_with_genes_kegg <- zlog2FC.heatmap %>% dplyr::filter(rownames(.) %in% genes_kegg$V1)
+
+genes_kegg <- genes_kegg %>% dplyr::filter(V1 %in% rownames(zlog2FC.heatmap_with_genes_kegg)) %>% mutate(label=paste0(V1,": ",keyword))
+rownames(genes_kegg) <- genes_kegg$V1
+
+row_anno_index <- which(rownames(zlog2FC.heatmap) %in% rownames(zlog2FC.heatmap_with_genes_kegg))
+row_anno_label <- rownames(zlog2FC.heatmap)[row_anno_index]
+row_anno_label2 <- genes_kegg[row_anno_label,]$label
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  celltype = colnames(zlog2FC.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")))
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label2,
+                  which="row",
+                  labels_gp = gpar(fontsize=7),
+                  padding=unit(0.5,"mm")))
+pdf(paste0(Dir,"/heatmap_RNAseq_expressed_DEgenes_log2FC_5kmm-hc.pdf"),width=24,height=30)
+Heatmap(zlog2FC.heatmap, 
+        name = "z-score log2 Fold Change",
+        top_annotation = column_ha,
+        right_annotation = row_ha,
+        column_title = "log2 fold change of DE genes in 3 celltypes after IFNg stimulation, KEGG genes labeled",
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        column_split = c(rep(1,ncol(log2FC.krt)), rep(2,ncol(log2FC.mel)), rep(3,ncol(log2FC.frb))),
+        row_split = split_instructions, 
+        show_row_names = FALSE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = FALSE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+dev.off()
+```
+
+## not used
+```{r heatmap-DEgenes-kegg-rowSelfOrdered}
+# 1. center and scale data
+logCPM <- log2(CPM + 1)
+CPM.scaled <- t(scale(t(as.matrix(logCPM[rownames(counts.expressed),])), center = TRUE, scale = TRUE)) %>% as.data.frame()
+CPM.scaled <- CPM.scaled[,c("F103M_NT_P1","F104M_NT_P1","F106M_NT_P1",
+                            "F103M_TGFB1_P1","F104M_TGFB1_P1","F106M_TGFB1_P1",
+                            "F103M_TGFB2_P1","F104M_TGFB2_P1","F106M_TGFB2_P1")]
+genes_ordered_by_NTmean <- CPM.scaled[,1:3] %>% mutate(ntmean=rowMeans(.)) %>% arrange(desc(ntmean)) %>% rownames_to_column("gene") %>% pull(gene)
+CPM.scaled <- CPM.scaled[genes_ordered_by_NTmean,]
+
+### 4. reorder rows based on DESeq2 results.
+# 4a. annotate response patterns
+res.tgfb1 <- results(dds,contrast=c("treatment", "TGFB1", "NT")) %>% as.data.frame %>% rownames_to_column("gene") %>% 
+  mutate(sig = ifelse(padj < 0.05, "sig", "nosig")) %>%
+  mutate(response = ifelse(log2FoldChange > 1.5, "TGFB1_up", ifelse(log2FoldChange < -1.5, "TGFB1_down", "TGFB1_nochange"))) %>%
+  mutate(response_sig = paste0(sig, "_", response))
+res.tgfb2 <- results(dds,contrast=c("treatment", "TGFB2", "NT")) %>% as.data.frame %>% rownames_to_column("gene") %>% 
+  mutate(sig = ifelse(padj < 0.05, "sig", "nosig")) %>%
+  mutate(response = ifelse(log2FoldChange > 1.5, "TGFB2_up", ifelse(log2FoldChange < -1.5, "TGFB2_down", "TGFB2_nochange"))) %>%
+  mutate(response_sig = paste0(sig, "_", response))
+res <- rbind(res.tgfb1, res.tgfb2)
+res.lite <- res[,c("gene","response_sig")] %>% group_by(gene) %>% summarize(response_sig=paste(response_sig,collapse=','))
+rownames(res.lite) <- res.lite$gene
+res.lite <- res.lite[genes_ordered_by_NTmean,] %>% na.omit()
+View(table(res.lite$response_sig))
+
+# 4b. define gene clusters
+# both up
+up_up <- res.lite[which(res.lite$response_sig=="sig_TGFB1_up,sig_TGFB2_up"),"gene"]
+# TGFB1 responding
+up_nc <- res.lite[which(res.lite$response_sig=="sig_TGFB1_up,sig_TGFB2_nochange" | res.lite$response_sig=="sig_TGFB1_up,nosig_TGFB2_nochange"),"gene"]
+down_nc <- res.lite[which(res.lite$response_sig=="sig_TGFB1_down,sig_TGFB2_nochange" | res.lite$response_sig=="sig_TGFB1_down,nosig_TGFB2_nochange"),"gene"]
+re_nc <- rbind(up_nc, down_nc)
+# TGFB2 responding
+nc_up <- res.lite[which(res.lite$response_sig=="sig_TGFB1_nochange,sig_TGFB2_up" | res.lite$response_sig=="nosig_TGFB1_nochange,sig_TGFB2_up"),"gene"]
+nc_down <- res.lite[which(res.lite$response_sig=="sig_TGFB1_nochange,sig_TGFB2_down" | res.lite$response_sig=="nosig_TGFB1_nochange,sig_TGFB2_down"),"gene"]
+nc_re <- rbind(nc_up, nc_down)
+# both down
+down_down <- res.lite[which(res.lite$response_sig=="sig_TGFB1_down,sig_TGFB2_down"),"gene"]
+# compile ordered genes.
+genes_of_interest <- c(up_up$gene, up_nc$gene, down_nc$gene, nc_up$gene, nc_down$gene, down_down$gene)
+split_instructions <- c(rep("1. both up",nrow(up_up)), rep("2. TGFB1 up",nrow(up_nc)), rep("3. TGFB1 down",nrow(down_nc)),
+                        rep("4. TGFB2 up",nrow(nc_up)), rep("5. TGFB2 down",nrow(nc_down)), rep("6. both down",nrow(down_down)))
+### 3. filter data matrix based on DE genes that are expressed
+# pick DE genes
+CPM.scaled.DEgene <- CPM.scaled[genes_of_interest,]
+
+# 4. load genes of interest
+genes_adhesion <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/GO0016337_cell-cell-adhesion.txt") %>% mutate(keyword=rep("adhesion",nrow(.)))
+genes_longevity <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04211_KEGG-longevity-regulating-pathway.txt") %>% mutate(keyword=rep("longevity",nrow(.)))
+genes_TGFBsignaling <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/M2642_KEGG-TGF-beta-signaling-pathway.txt") %>% mutate(keyword=rep("TGFB",nrow(.)))
+genes_apoptosis <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04210_KEGG-apoptosis.txt") %>% mutate(keyword=rep("apoptosis",nrow(.)))
+genes_hippo <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04390_KEGG-hippo.txt") %>% mutate(keyword=rep("hippo",nrow(.)))
+genes_autophagy <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04140_KEGG-autophagy.txt") %>% mutate(keyword=rep("autophagy",nrow(.)))
+genes_ROS <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa05208_KEGG-ROS.txt") %>% mutate(keyword=rep("ROS",nrow(.)))
+genes_melanogenesis <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04916_KEGG-melanogenesis.txt") %>% mutate(keyword=rep("melanogenesis",nrow(.)))
+
+genes_kegg <- rbind(genes_adhesion, genes_longevity, genes_TGFBsignaling, genes_apoptosis, genes_hippo, genes_autophagy, genes_ROS,genes_melanogenesis) %>% group_by(V1) %>% 
+summarize(keyword=paste(keyword,collapse=','))
+
+CPM_with_genes_kegg <- CPM.scaled.DEgene %>% dplyr::filter(rownames(.) %in% genes_kegg$V1)
+
+genes_kegg <- genes_kegg %>% dplyr::filter(V1 %in% rownames(CPM_with_genes_kegg)) %>% mutate(label=paste0(V1,": ",keyword))
+rownames(genes_kegg) <- genes_kegg$V1
+
+row_anno_index <- which(rownames(CPM.scaled.DEgene) %in% rownames(CPM_with_genes_kegg))
+row_anno_label <- rownames(CPM.scaled.DEgene)[row_anno_index]
+row_anno_label2 <- genes_kegg[row_anno_label,]$label
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  treatment = colnames(CPM.scaled.DEgene) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  donor = colnames(CPM.scaled.DEgene) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[1]) %>% unlist(),
+  col = list(treatment = c("NT" = "black", "TGFB1" = "green", "TGFB2" = "blue"),
+             donor = c("F103M" = "pink", "F104M" = "yellow", "F106M" = "magenta")))
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label2,
+                  which="row",
+                  labels_gp = gpar(fontsize=3),
+                  padding=unit(0.5,"mm")))
+pdf(paste0(Dir,"/heatmap_RNAseq_TGFB1-TGFB2-NT_DEgenes_genes-labeled_row-reordered.pdf"))
+Heatmap(CPM.scaled.DEgene, 
+        name = "z-score log2CPM",
+        top_annotation = column_ha,
+        right_annotation = row_ha,
+        column_title = "DE genes in TGFB1 or TGFB2 treatment of melanocytes, KEGG genes labeled",
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        column_split = rep(1:3, each = 3),
+        row_split = split_instructions, 
+        show_row_names = FALSE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = FALSE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+dev.off()
+```
+```{r heatmap-DEgenes-donorMeans-kegg-rowSelfOrdered}
+CPMmean <- data.frame(NT=rowMeans(cbind(CPM$F103M_NT_P1, CPM$F104M_NT_P1, CPM$F106M_NT_P1)),
+                      TGFB1=rowMeans(cbind(CPM$F103M_TGFB1_P1, CPM$F104M_TGFB1_P1, CPM$F106M_TGFB1_P1)),
+                      TGFB2=rowMeans(cbind(CPM$F103M_TGFB2_P1, CPM$F104M_TGFB2_P1, CPM$F106M_TGFB2_P1)))
+rownames(CPMmean) <- rownames(CPM)
+CPMmean <- CPMmean[rownames(counts.expressed),]
+
+# 1. center and scale data
+logCPM <- log2(CPMmean + 1)
+CPM.scaled <- t(scale(t(as.matrix(logCPM[rownames(counts.expressed),])), center = TRUE, scale = TRUE)) %>% as.data.frame()
+
+# 1. center and scale data
+genes_ordered_by_NTmean <- CPM.scaled %>% arrange(desc(NT)) %>% rownames_to_column("gene") %>% pull(gene)
+CPM.scaled <- CPM.scaled[genes_ordered_by_NTmean,]
+
+### 4. reorder rows based on DESeq2 results.
+#
+temp1 <- results(dds,contrast=c("treatment", "TGFB1", "NT")) %>% as.data.frame %>% mutate(treatment="TGFB1") %>% rownames_to_column("gene")
+temp2 <- results(dds,contrast=c("treatment", "TGFB2", "NT")) %>% as.data.frame %>% mutate(treatment="TGFB2") %>% rownames_to_column("gene")
+write.table(rbind(temp1,temp2), file=paste0(Dir,"/DESeq2_all_results.txt"),quote=F,row.names=F,col.names=T,sep="\t")
+
+
+# 4a. annotate response patterns
+res.tgfb1 <- results(dds,contrast=c("treatment", "TGFB1", "NT")) %>% as.data.frame %>% rownames_to_column("gene") %>% 
+  mutate(sig = ifelse(padj < 0.05, "sig", "nosig")) %>%
+  mutate(response = ifelse(log2FoldChange > 1.5, "TGFB1_up", ifelse(log2FoldChange < -1.5, "TGFB1_down", "TGFB1_nochange"))) %>%
+  mutate(response_sig = paste0(sig, "_", response))
+res.tgfb2 <- results(dds,contrast=c("treatment", "TGFB2", "NT")) %>% as.data.frame %>% rownames_to_column("gene") %>% 
+  mutate(sig = ifelse(padj < 0.05, "sig", "nosig")) %>%
+  mutate(response = ifelse(log2FoldChange > 1.5, "TGFB2_up", ifelse(log2FoldChange < -1.5, "TGFB2_down", "TGFB2_nochange"))) %>%
+  mutate(response_sig = paste0(sig, "_", response))
+res <- rbind(res.tgfb1, res.tgfb2)
+res.lite <- res[,c("gene","response_sig")] %>% group_by(gene) %>% summarize(response_sig=paste(response_sig,collapse=','))
+rownames(res.lite) <- res.lite$gene
+res.lite <- res.lite[genes_ordered_by_NTmean,] %>% na.omit()
+View(table(res.lite$response_sig))
+
+# 4b. define gene clusters
+# both up
+up_up <- res.lite[which(res.lite$response_sig=="sig_TGFB1_up,sig_TGFB2_up"),"gene"]
+# TGFB1 responding
+up_nc <- res.lite[which(res.lite$response_sig=="sig_TGFB1_up,sig_TGFB2_nochange" | res.lite$response_sig=="sig_TGFB1_up,nosig_TGFB2_nochange"),"gene"]
+down_nc <- res.lite[which(res.lite$response_sig=="sig_TGFB1_down,sig_TGFB2_nochange" | res.lite$response_sig=="sig_TGFB1_down,nosig_TGFB2_nochange"),"gene"]
+re_nc <- rbind(up_nc, down_nc)
+# TGFB2 responding
+nc_up <- res.lite[which(res.lite$response_sig=="sig_TGFB1_nochange,sig_TGFB2_up" | res.lite$response_sig=="nosig_TGFB1_nochange,sig_TGFB2_up"),"gene"]
+nc_down <- res.lite[which(res.lite$response_sig=="sig_TGFB1_nochange,sig_TGFB2_down" | res.lite$response_sig=="nosig_TGFB1_nochange,sig_TGFB2_down"),"gene"]
+nc_re <- rbind(nc_up, nc_down)
+# both down
+down_down <- res.lite[which(res.lite$response_sig=="sig_TGFB1_down,sig_TGFB2_down"),"gene"]
+# compile ordered genes.
+#genes_of_interest <- c(up_up$gene, re_nc$gene, nc_re$gene, down_down$gene)
+#split_instructions <- c(rep(1,nrow(up_up)), rep(2,nrow(re_nc)), rep(3,nrow(nc_re)), rep(4,nrow(down_down)))
+
+genes_of_interest <- c(up_up$gene, up_nc$gene, nc_up$gene, down_nc$gene, nc_down$gene, down_down$gene)
+split_instructions <- c(rep("1. both up",nrow(up_up)), rep("2. TGFB1 up",nrow(up_nc)), rep("3. TGFB2 up",nrow(nc_up)), 
+                        rep("4. TGFB1 down",nrow(down_nc)), rep("5. TGFB2 down",nrow(nc_down)), rep("6. both down",nrow(down_down)))
+
+df <- cbind(genes_of_interest, split_instructions) %>% gsub("^[0-9]. ","",.) %>% gsub(" ","_",.)
+write.table(df, file=paste0(Dir,"/genes_of_interest.txt"),quote=F,row.names=FALSE,col.names=F,sep="\t")
+
+### 3. filter data matrix based on DE genes that are expressed
+# pick DE genes
+CPM.scaled.DEgene <- CPM.scaled[genes_of_interest,]
+
+# 4. load genes of interest
+genes_adhesion <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/GO0016337_cell-cell-adhesion.txt") %>% mutate(keyword=rep("adhesion",nrow(.)))
+genes_longevity <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04211_KEGG-longevity-regulating-pathway.txt") %>% mutate(keyword=rep("longevity",nrow(.)))
+genes_TGFBsignaling <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/M2642_KEGG-TGF-beta-signaling-pathway.txt") %>% mutate(keyword=rep("TGFB",nrow(.)))
+genes_apoptosis <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04210_KEGG-apoptosis.txt") %>% mutate(keyword=rep("apoptosis",nrow(.)))
+genes_hippo <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04390_KEGG-hippo.txt") %>% mutate(keyword=rep("hippo",nrow(.)))
+genes_autophagy <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04140_KEGG-autophagy.txt") %>% mutate(keyword=rep("autophagy",nrow(.)))
+genes_ROS <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa05208_KEGG-ROS.txt") %>% mutate(keyword=rep("ROS",nrow(.)))
+genes_melanogenesis <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04916_KEGG-melanogenesis.txt") %>% mutate(keyword=rep("melanogenesis",nrow(.)))
+
+genes_kegg <- rbind(genes_adhesion, genes_longevity, genes_TGFBsignaling, genes_apoptosis, genes_hippo, genes_autophagy, genes_ROS, genes_melanogenesis) %>% group_by(V1) %>% 
+summarize(keyword=paste(keyword,collapse=','))
+
+CPM_with_genes_kegg <- CPM.scaled.DEgene %>% dplyr::filter(rownames(.) %in% genes_kegg$V1)
+
+genes_kegg <- genes_kegg %>% dplyr::filter(V1 %in% rownames(CPM_with_genes_kegg)) %>% mutate(label=paste0(V1,": ",keyword))
+rownames(genes_kegg) <- genes_kegg$V1
+
+row_anno_index <- which(rownames(CPM.scaled.DEgene) %in% rownames(CPM_with_genes_kegg))
+row_anno_label <- rownames(CPM.scaled.DEgene)[row_anno_index]
+row_anno_label2 <- genes_kegg[row_anno_label,]$label
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  treatment = colnames(CPM.scaled.DEgene),
+  col = list(treatment = c("NT" = "black", "TGFB1" = "green", "TGFB2" = "blue")))
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label2,
+                  which="row",
+                  labels_gp = gpar(fontsize=3),
+                  padding=unit(0.5,"mm")))
+pdf(paste0(Dir,"/heatmap_RNAseq_TGFB1-TGFB2-NT_DEgenes_donorAvgCPM_genes-labeled_row-reordered.pdf"))
+Heatmap(CPM.scaled.DEgene, 
+        name = "z-score log2CPM",
+        top_annotation = column_ha,
+        right_annotation = row_ha,
+        column_title = "DE genes in TGFB1 or TGFB2 treatment of melanocytes, KEGG genes labeled, z-score: log2(CPM mean of F103,F104,F106)",
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        column_split = rep(1:3, each = 1),
+        row_split = split_instructions, 
+        show_row_names = FALSE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = FALSE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+dev.off()
+```
+```{r heatmap-top1kCoV}
+# 1. center and scale data
+logCPM <- log2(CPM + 1)
+CPM.scaled <- scale(as.matrix(logCPM[rownames(counts.expressed),]), center = TRUE, scale = TRUE) %>% as.data.frame()
+CPM.scaled <- CPM.scaled[,c("F103M_NT_P1","F104M_NT_P1","F106M_NT_P1",
+                            "F103M_TGFB1_P1","F104M_TGFB1_P1","F106M_TGFB1_P1",
+                            "F103M_TGFB2_P1","F104M_TGFB2_P1","F106M_TGFB2_P1")]
+# 2. find top variable genes by CoV
+mat.logCPM.lnsd <- apply(logCPM,MARGIN=1,FUN=sd)
+mat.logCPM.lncv <- sqrt( (exp(mat.logCPM.lnsd) )^2 -1) #coefficient of variance
+logCPM.top1k <- logCPM[order(mat.logCPM.lncv,decreasing=T),][1:1000,] 
+CPM.top1k <- CPM[order(mat.logCPM.lncv,decreasing=T),][1:1000,] 
+genes.top1kcov <- rownames(logCPM.top1k)
+
+# 3. filter data matrix based on candidate genes
+CPM.scaled.top1kcov <- CPM.scaled %>% dplyr::filter(rownames(.) %in% genes.top1kcov)
+# 4. load genes of interest
+genes_of_interest <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/GO0016337_cell-cell-adhesion.txt")
+CPM_with_genes_of_interest <- CPM.scaled.top1kcov %>% dplyr::filter(rownames(.) %in% genes_of_interest$V1)
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  treatment = colnames(CPM.scaled) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  donor = colnames(CPM.scaled) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[1]) %>% unlist(),
+  col = list(treatment = c("NT" = "black", "TGFB1" = "green", "TGFB2" = "blue"),
+             donor = c("F103M" = "pink", "F104M" = "yellow", "F106M" = "magenta")))
+row_ha = rowAnnotation(
+  foo = anno_mark(at = which(rownames(CPM.scaled.top1kcov) %in% rownames(CPM_with_genes_of_interest)), 
+                  labels = rownames(CPM_with_genes_of_interest),
+                  which="row",
+                  labels_gp = gpar(fontsize=5),
+                  padding=unit(0.5,"mm")))
+pdf(paste0(Dir,"/heatmap_RNAseq_TGFB1-TGFB2-NT_top1kCOVgenes.pdf"))
+Heatmap(CPM.scaled.top1kcov, 
+        row_km = 5,
+        name = "z-score log2CPM",
+        top_annotation = column_ha,
+        right_annotation = row_ha,
+        column_title = "top 1k variable genes in TGFB1 or TGFB2 treatment of melanocytes, cell-cell-adhesion genes labeled",
+        cluster_columns = FALSE,
+        column_split = rep(1:3, each = 3),
+        show_row_names = FALSE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 8),
+        column_title_gp = gpar(fontsize = 7, fontface = "bold"))
+dev.off()
+```
+```{r heatmap-DEgenes}
+# 1. center and scale data
+logCPM <- log2(CPM + 1)
+CPM.scaled <- scale(as.matrix(logCPM[rownames(counts.expressed),]), center = TRUE, scale = TRUE) %>% as.data.frame()
+CPM.scaled <- CPM.scaled[,c("F103M_NT_P1","F104M_NT_P1","F106M_NT_P1",
+                            "F103M_TGFB1_P1","F104M_TGFB1_P1","F106M_TGFB1_P1",
+                            "F103M_TGFB2_P1","F104M_TGFB2_P1","F106M_TGFB2_P1")]
+# pick DE genes
+genes.de <- unique(res$gene)
+
+# 3. filter data matrix based on candidate genes
+CPM.scaled.DEgene <- CPM.scaled %>% dplyr::filter(rownames(.) %in% unique(res$gene))
+# 4. load genes of interest
+genes_of_interest <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/GO0016337_cell-cell-adhesion.txt")
+CPM_with_genes_of_interest <- CPM.scaled.DEgene %>% dplyr::filter(rownames(.) %in% genes_of_interest$V1)
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  treatment = colnames(CPM.scaled) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  donor = colnames(CPM.scaled) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[1]) %>% unlist(),
+  col = list(treatment = c("NT" = "black", "TGFB1" = "green", "TGFB2" = "blue"),
+             donor = c("F103M" = "pink", "F104M" = "yellow", "F106M" = "magenta")))
+row_ha = rowAnnotation(
+  foo = anno_mark(at = which(rownames(CPM.scaled.DEgene) %in% rownames(CPM_with_genes_of_interest)), 
+                  labels = rownames(CPM_with_genes_of_interest),
+                  which="row",
+                  labels_gp = gpar(fontsize=5),
+                  padding=unit(0.5,"mm")))
+pdf(paste0(Dir,"/heatmap_RNAseq_TGFB1-TGFB2-NT_DEgenes.pdf"))
+Heatmap(CPM.scaled.DEgene, 
+        row_km = 5,
+        name = "z-score log2CPM",
+        top_annotation = column_ha,
+        right_annotation = row_ha,
+        column_title = "DE genes in TGFB1 or TGFB2 treatment of melanocytes, cell-cell-adhesion genes labeled",
+        cluster_columns = FALSE,
+        column_split = rep(1:3, each = 3),
+        show_row_names = FALSE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 8),
+        column_title_gp = gpar(fontsize = 7, fontface = "bold"))
+dev.off()
+```
+```{r heatmap-DEgenes-kegg}
+# 1. center and scale data
+logCPM <- log2(CPM + 1)
+CPM.scaled <- scale(as.matrix(logCPM[rownames(counts.expressed),]), center = TRUE, scale = TRUE) %>% as.data.frame()
+CPM.scaled <- CPM.scaled[,c("F103M_NT_P1","F104M_NT_P1","F106M_NT_P1",
+                            "F103M_TGFB1_P1","F104M_TGFB1_P1","F106M_TGFB1_P1",
+                            "F103M_TGFB2_P1","F104M_TGFB2_P1","F106M_TGFB2_P1")]
+# pick DE genes
+genes.de <- unique(res$gene)
+
+# 3. filter data matrix based on candidate genes
+CPM.scaled.DEgene <- CPM.scaled %>% dplyr::filter(rownames(.) %in% genes.top1kcov)
+# 4. load genes of interest
+genes_of_interest <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/M2642_KEGG-TGF-beta-signaling-pathway.txt")
+CPM_with_genes_of_interest <- CPM.scaled.DEgene %>% dplyr::filter(rownames(.) %in% genes_of_interest$V1)
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  treatment = colnames(CPM.scaled) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  donor = colnames(CPM.scaled) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[1]) %>% unlist(),
+  col = list(treatment = c("NT" = "black", "TGFB1" = "green", "TGFB2" = "blue"),
+             donor = c("F103M" = "pink", "F104M" = "yellow", "F106M" = "magenta")))
+row_ha = rowAnnotation(
+  foo = anno_mark(at = which(rownames(CPM.scaled.DEgene) %in% rownames(CPM_with_genes_of_interest)), 
+                  labels = rownames(CPM_with_genes_of_interest),
+                  which="row",
+                  labels_gp = gpar(fontsize=5),
+                  padding=unit(0.5,"mm")))
+pdf(paste0(Dir,"/heatmap_RNAseq_TGFB1-TGFB2-NT_DEgenes_TNFB-pathway-genes-labeled.pdf"))
+Heatmap(CPM.scaled.DEgene, 
+        row_km = 5,
+        name = "z-score log2CPM",
+        top_annotation = column_ha,
+        right_annotation = row_ha,
+        column_title = "DE genes in TGFB1 or TGFB2 treatment of melanocytes, KEGG TNFB pathway genes labeled",
+        cluster_columns = FALSE,
+        column_split = rep(1:3, each = 3),
+        show_row_names = FALSE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = TRUE,
+        column_names_gp = gpar(fontsize = 8),
+        column_title_gp = gpar(fontsize = 7, fontface = "bold"))
+dev.off()
+```
+```{r heatmap-DEgenes-kegg-rowClustered-kmm-hclust}
+# 1. center and scale data
+logCPM <- log2(CPM + 1)
+logCPM <- logCPM[,c("F103M_NT_P1","F104M_NT_P1","F106M_NT_P1",
+                            "F103M_TGFB1_P1","F104M_TGFB1_P1","F106M_TGFB1_P1",
+                            "F103M_TGFB2_P1","F104M_TGFB2_P1","F106M_TGFB2_P1")]
+
+# 2. define gene clusters
+# both up
+up_up <- res.lite[which(res.lite$response_sig=="sig_TGFB1_up,sig_TGFB2_up"),"gene"]
+# TGFB1 responding
+up_nc <- res.lite[which(res.lite$response_sig=="sig_TGFB1_up,sig_TGFB2_nochange" | res.lite$response_sig=="sig_TGFB1_up,nosig_TGFB2_nochange"),"gene"]
+down_nc <- res.lite[which(res.lite$response_sig=="sig_TGFB1_down,sig_TGFB2_nochange" | res.lite$response_sig=="sig_TGFB1_down,nosig_TGFB2_nochange"),"gene"]
+re_nc <- rbind(up_nc, down_nc)
+# TGFB2 responding
+nc_up <- res.lite[which(res.lite$response_sig=="sig_TGFB1_nochange,sig_TGFB2_up" | res.lite$response_sig=="nosig_TGFB1_nochange,sig_TGFB2_up"),"gene"]
+nc_down <- res.lite[which(res.lite$response_sig=="sig_TGFB1_nochange,sig_TGFB2_down" | res.lite$response_sig=="nosig_TGFB1_nochange,sig_TGFB2_down"),"gene"]
+nc_re <- rbind(nc_up, nc_down)
+# both down
+down_down <- res.lite[which(res.lite$response_sig=="sig_TGFB1_down,sig_TGFB2_down"),"gene"]
+# compile ordered genes.
+genes_of_interest <- c(up_up$gene, up_nc$gene, down_nc$gene, nc_up$gene, nc_down$gene, down_down$gene)
+
+# 3. annotate response patterns
+res.tgfb1 <- results(dds,contrast=c("treatment", "TGFB1", "NT")) %>% as.data.frame %>% rownames_to_column("gene") %>% 
+  mutate(sig = ifelse(padj < 0.05, "sig", "nosig")) %>%
+  mutate(response = ifelse(log2FoldChange > 1.5, "TGFB1_up", ifelse(log2FoldChange < -1.5, "TGFB1_down", "TGFB1_nochange"))) %>%
+  mutate(response_sig = paste0(sig, "_", response))
+res.tgfb2 <- results(dds,contrast=c("treatment", "TGFB2", "NT")) %>% as.data.frame %>% rownames_to_column("gene") %>% 
+  mutate(sig = ifelse(padj < 0.05, "sig", "nosig")) %>%
+  mutate(response = ifelse(log2FoldChange > 1.5, "TGFB2_up", ifelse(log2FoldChange < -1.5, "TGFB2_down", "TGFB2_nochange"))) %>%
+  mutate(response_sig = paste0(sig, "_", response))
+res <- rbind(res.tgfb1, res.tgfb2)
+res.lite <- res[,c("gene","response_sig")] %>% group_by(gene) %>% summarize(response_sig=paste(response_sig,collapse=','))
+rownames(res.lite) <- res.lite$gene
+
+# 4. hierarchially cluster K-means clusters
+# perform k-means-clustering to determine k_row.
+df <- logCPM[genes_of_interest,]
+wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+
+# useful function
+niceKmeans <-function (df, k, kmeans.algorithm = "Lloyd", iter.max = 1000, nstart=100) {
+  
+  result = data.frame();
+  source = t(scale(t(df)));
+  kmeans = kmeans(source, centers = k, iter.max = iter.max, algorithm=kmeans.algorithm, nstart=nstart);
+  clustered = data.frame();
+  breaks = c();
+  for (i in 1:k) {
+    print(sprintf("Doing cluster %i",i))
+    cluster = source[kmeans$cluster==i,];
+    rows = row.names(cluster);
+    clust = heatmap.2(as.matrix(cluster), distfun=function(x) as.dist((1-cor(t(x)))/2))
+    cluster.ordered = cluster[clust$rowInd,];
+    cluster.ordered.genes = rows[clust$rowInd];
+    row.names(cluster.ordered) = cluster.ordered.genes;
+    class = data.frame(row.names=cluster.ordered.genes);
+    class[,"class"] = i 
+    cluster.ordered = cbind(cluster.ordered, class);
+    clustered = rbind(clustered, cluster.ordered);
+    if(i > 1 & i < k) {
+      breaks[i] = as.numeric(breaks[i-1]) + length(rows);
+    } else if(i==1) {
+      breaks[i] = length(rows);
+    }
+  }
+  
+  result <- list();
+  result$clustered <- clustered;
+  result$breaks <- breaks;
+  return(result);
+}
+
+km_res <- niceKmeans(logCPM[genes_of_interest,], 3)
+#split_instructions <- c(rep(1,km_res$breaks[1]), rep(2,km_res$breaks[2]-km_res$breaks[1]), 
+#                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                        rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,nrow(km_res$clustered)-km_res$breaks[2]))
+zlogCPM.heatmap <- km_res$clustered[,1:9]
+
+# 4. load genes of interest
+genes_adhesion <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/GO0016337_cell-cell-adhesion.txt") %>% mutate(keyword=rep("adhesion",nrow(.)))
+genes_longevity <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04211_KEGG-longevity-regulating-pathway.txt") %>% mutate(keyword=rep("longevity",nrow(.)))
+genes_TGFBsignaling <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/M2642_KEGG-TGF-beta-signaling-pathway.txt") %>% mutate(keyword=rep("TGFB",nrow(.)))
+genes_apoptosis <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04210_KEGG-apoptosis.txt") %>% mutate(keyword=rep("apoptosis",nrow(.)))
+genes_hippo <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04390_KEGG-hippo.txt") %>% mutate(keyword=rep("hippo",nrow(.)))
+genes_autophagy <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa04140_KEGG-autophagy.txt") %>% mutate(keyword=rep("autophagy",nrow(.)))
+genes_ROS <- read.table("~/Downloads/nl/human/skin/eQTLs/melanocyte_chemokine/RNAseq_analysis/TGFB/hsa05208_KEGG-ROS.txt") %>% mutate(keyword=rep("ROS",nrow(.)))
+
+genes_kegg <- rbind(genes_adhesion, genes_longevity, genes_TGFBsignaling, genes_apoptosis, genes_hippo, genes_autophagy, genes_ROS) %>% group_by(V1) %>% summarize(keyword=paste(keyword,collapse=','))
+
+zlogCPM.heatmap_with_genes_kegg <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% genes_kegg$V1)
+
+genes_kegg <- genes_kegg %>% dplyr::filter(V1 %in% rownames(zlogCPM.heatmap_with_genes_kegg)) %>% mutate(label=paste0(V1,": ",keyword))
+rownames(genes_kegg) <- genes_kegg$V1
+
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_genes_kegg))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+row_anno_label2 <- genes_kegg[row_anno_label,]$label
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  treatment = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  donor = colnames(zlogCPM.heatmap) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[1]) %>% unlist(),
+  col = list(treatment = c("NT" = "black", "TGFB1" = "green", "TGFB2" = "blue"),
+             donor = c("F103M" = "pink", "F104M" = "yellow", "F106M" = "magenta")))
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label2,
+                  which="row",
+                  labels_gp = gpar(fontsize=3),
+                  padding=unit(0.5,"mm")))
+pdf(paste0(Dir,"/heatmap_RNAseq_TGFB1-TGFB2-NT_DEgenes_genes-labeled_3kmm-hc.pdf"))
+Heatmap(zlogCPM.heatmap, 
+        name = "z-score log2CPM",
+        top_annotation = column_ha,
+        right_annotation = row_ha,
+        column_title = "DE genes in TGFB1 or TGFB2 treatment of melanocytes, KEGG genes labeled",
+        cluster_columns = FALSE,
+        cluster_rows = FALSE,
+        column_split = rep(1:3, each = 3),
+        row_split = split_instructions, 
+        show_row_names = FALSE,
+        row_title_rot = 0,
+        column_names_rot = 45,
+        row_gap = unit(2, "mm"),
+        border = FALSE,
+        column_names_gp = gpar(fontsize = 5),
+        column_title_gp = gpar(fontsize = 5, fontface = "bold"),
+        row_title_gp = gpar(fontsize = 5, fontface = "bold"))
+dev.off()
+```
+```{r pca}
+# PCA of top 1kCoV log2(CPM+1)
+pca = prcomp(t(logCPM.top1k),centered= T,scale = T)
+loadings=as.data.frame(pca$rotation)
+# percent variance in each pc
+plot(pca)
+pcs = pca$x
+pca.pctVar = pca$sdev^2/sum(pca$sdev^2)
+# PC1 is 55.8%, PC2 is 23.8%, PC3 is 13.8%. Top 1000 variable genes separate well by 
+
+# plot
+d=data.frame(pca$x,sample=rownames(pcs))
+d=inner_join(d,metadata,by="sample") %>% magrittr::set_rownames(d$sample)
+d %>%
+  ggplot(., aes(y=PC1,x=PC2,col=treatment,shape=donor,label=sample)) + 
+  geom_point(size=3) + 
+  geom_text_repel(show.legend = F,size=2) +
+  ylab(sprintf("PC1 (%2.1f%% variance)",100*pca.pctVar[1])) + 
+  xlab(sprintf("PC2 (%2.1f%% variance)",100*pca.pctVar[2])) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  ggsave(filename=paste0(Dir,"/PCA_PC1PC2_treatment-donor.png"))
+```
+
+
+
+
+
+
+
+
+
+

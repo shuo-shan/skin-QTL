@@ -1,0 +1,184 @@
+---
+title: "color_peer_factor_by_known_factors"
+author: "Crystal Shan"
+date: "2025-07-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load}
+library(dplyr)
+library(tidyverse)
+library(DESeq2)
+library(BiocParallel)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(gridExtra)
+library(lme4)
+library(lmerTest)
+library(tidyr)
+library(tibble)
+Dir="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/peer/"
+load(file=paste0(Dir,"/myEnvironment_main.RData"))
+```
+
+```{r compile}
+# peer factor
+dir.peer <- "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/peer/peer_factors"
+sc <- "MEL_PBS-IFNG"
+peer_factors <- data.table::fread(paste0(dir.peer, "/peer_factors_",sc,".tsv")) 
+colnames(peer_factors)[1] <- "sample"
+
+# genotype PC
+genotype_pcs <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/donor_genotyping/hg38/genotype_PCs_for_modeling_07242025.txt") %>% 
+  dplyr::select(-c("FID","donor_num")) 
+
+# metadata
+this_df <- left_join(peer_factors, metadata, by="sample") %>%
+  left_join( . , genotype_pcs, by="donor")
+
+# reshape to long format, restrict to peer1 to 10
+peer_cols <- grep("^PEER", names(this_df), value = TRUE)  # detect PEER columns
+peer_cols <- paste0("PEER", 1:10)
+pc_cols <- paste0("PC", 1:10)
+
+# STEP 2: Convert read_length to numeric
+this_df$read_length_bp <- as.numeric(gsub("bp", "", this_df$read_length))
+
+this_long <- this_df %>%
+  select(all_of(peer_cols), sequencing_platform, total_reads, read_length, all_of(pc_cols)) %>%
+  pivot_longer(cols = all_of(peer_cols), names_to = "PEER", values_to = "value")
+this_long$PEER <- factor(this_long$PEER, levels = paste0("PEER", 1:10))
+
+```
+```{r plot}
+# Plot PEER factors vs sequencing_platform (categorical variable)
+p.seqplatform <- ggplot(this_long, aes(x = sequencing_platform, y = value, fill = sequencing_platform)) +
+  geom_boxplot(outlier.size = 0.5) +
+  facet_wrap(~ PEER, scales = "free_y") +
+  theme_bw() +
+  labs(title = "PEER Factors vs Sequencing Platform",
+       y = "PEER Value", x = "Sequencing Platform") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot PEER factors vs total_reads (continuous variable)
+p.totalread <- ggplot(this_long, aes(x = total_reads, y = value)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "steelblue") +
+  facet_wrap(~ PEER, scales = "free_y") +
+  theme_bw() +
+  labs(title = "PEER Factors vs Total Reads",
+       y = "PEER Value", x = "Total Reads")
+
+# plot PEER vs read_length
+this_df$read_length_bp <- as.numeric(gsub("bp", "", this_df$read_length))
+this_long2 <- this_df %>%
+  select(all_of(peer_cols), read_length_bp) %>%
+  pivot_longer(cols = all_of(peer_cols), names_to = "PEER", values_to = "value")
+
+p.readlength <- ggplot(this_long2, aes(x = read_length_bp, y = value)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "darkgreen") +
+  facet_wrap(~ PEER, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "PEER Factors vs Read Length",
+       x = "Read Length (bp)", y = "PEER Value")
+
+# PEER vs genotype PC
+# Select only PEER and PC columns
+library(pheatmap)
+peer_cols <- paste0("PEER", 1:10)
+pc_cols <- paste0("PC", 1:10)
+
+this_df <- as.data.frame(this_df)
+# Compute the correlation matrix using the correct data.table syntax
+cor_matrix <- cor(this_df[, peer_cols], this_df[, pc_cols], use = "pairwise.complete.obs", method = "pearson")
+
+# Plot
+p.genotypePC <- pheatmap(cor_matrix,
+         main = "Correlation: PEER factors vs Genotype PCs",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         display_numbers = TRUE,
+         fontsize_number = 10)
+```
+```{r cormat}
+library(data.table)
+library(Hmisc)  # for rcorr()
+
+# Define your PEER and covariate columns
+peer_cols <- paste0("PEER", 1:10)
+known_covariates <- setdiff(colnames(this_df), c("sample", peer_cols))  # exclude sample name and PEERs
+
+# Initialize results list
+cor_results <- list()
+
+# Loop over PEER factors and known covariates
+for (peer in peer_cols) {
+  for (covar in known_covariates) {
+    print(paste0(peer,"_",covar))
+    x <- this_df[[peer]]
+    y <- this_df[[covar]]
+    
+    # Only do correlation if both are numeric
+    if (is.numeric(x) && is.numeric(y)) {
+      result <- cor.test(x, y, method = "pearson")
+      cor_results[[paste(peer, covar, sep = "_vs_")]] <- list(
+        peer = peer,
+        covariate = covar,
+        cor = result$estimate,
+        pval = result$p.value
+      )
+    }
+  }
+}
+
+# Convert list to data.frame
+cor_df <- rbindlist(cor_results, fill = TRUE)
+
+# Adjust p-values (optional)
+cor_df[, p_adj := p.adjust(pval, method = "fdr")]
+
+cor_heatmap <- ggplot(cor_df, aes(x = peer, y = covariate, fill = -log10(p_adj))) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(title = "Covariate correlation matrix\n lm() CPM ~ covariates + genotype * condition + (1|donor)", fill = "-log10(p)") +
+  theme_minimal()
+
+# View top hits
+cor_df[order(pval)][1:20]
+
+#### ------ Heatmap --------- ####
+library(ComplexHeatmap)
+library(circlize)
+
+# Filter and pivot to wide matrix
+mat <- cor_df %>%
+  select(peer, covariate, cor) %>%
+  pivot_wider(names_from = covariate, values_from = cor) %>%
+  column_to_rownames("peer") %>%
+  as.matrix()
+
+# Create custom color function
+col_fun <- colorRamp2(
+  c(-1, -0.5, 0, 0.5, 1),
+  c("darkblue", "lightblue", "white", "lightcoral", "darkred")
+)
+
+# Plot
+p <- Heatmap(
+  mat,
+  name = "cor",
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  heatmap_legend_param = list(title = "Correlation")
+)
+```

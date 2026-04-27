@@ -1,0 +1,163 @@
+---
+title: "fetch_TSSwindows"
+author: "Crystal Shan"
+date: "2024-02-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages  
+```{r package, warning=FALSE, include=FALSE}
+library(dplyr)
+library(magrittr)
+library(tidyverse)
+library(gplots)
+library(ggfortify)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(ggpubr)
+library(DESeq2)
+library(ComplexHeatmap)
+
+Dir="~/Downloads/nl/human/skin/eQTLs/integrative_analysis"
+setwd(Dir)
+
+outDir="~/Downloads/nl/human/skin/eQTLs/integrative_analysis/XSTREME/commonly_induced_genes_promoter"
+
+load(paste0(Dir,"/heatmap_RNA_round2/myEnvironment_heatmap_RNAseq_DEgenes_14kmm-hc_04182023_padj0.05_log2FC1.5_avgCPM10.RData"))
+res.atac.dds.frb = readRDS("~/Downloads/nl/human/skin/eQTLs/ATACseq_DolphinNext/DESeq2/DESeq2_results_ATACseq_peaks_1kb_FRB.Rdata")
+res.atac.dds.krt = readRDS("~/Downloads/nl/human/skin/eQTLs/ATACseq_DolphinNext/DESeq2/DESeq2_results_ATACseq_peaks_1kb_KRT.Rdata")
+res.atac.dds.mel = readRDS("~/Downloads/nl/human/skin/eQTLs/ATACseq_DolphinNext/DESeq2/DESeq2_results_ATACseq_peaks_1kb_MEL.Rdata")
+res.chip.dds.frb = readRDS("~/Downloads/nl/human/skin/eQTLs/ChIP-seq/DESeq2/DESeq2_results_H3K27acChIPseq_peaks_1kb_FRB.Rdata")
+res.chip.dds.krt = readRDS("~/Downloads/nl/human/skin/eQTLs/ChIP-seq/DESeq2/DESeq2_results_H3K27acChIPseq_peaks_1kb_KRT.Rdata")
+res.chip.dds.mel = readRDS("~/Downloads/nl/human/skin/eQTLs/ChIP-seq/DESeq2/DESeq2_results_H3K27acChIPseq_peaks_1kb_MEL.Rdata")
+link_gene_promoter = readRDS(paste0(Dir,"/heatmap_RNA_round2/link_gene_promoter_within_300kbp_of_TSS_allcts.Rdata"))
+link_gene_enhancer = readRDS(paste0(Dir,"/heatmap_RNA_round2/link_gene_enhancer_within_300kbp_of_TSS_allcts.Rdata"))
+FRB_cRE_dynamics = readRDS(paste0(Dir,"/heatmap_RNA_round2/FRB_gene_and_cRE_RNA_ATAC_and_H3K27ac_dynamics.Rdata"))
+MEL_cRE_dynamics = readRDS(paste0(Dir,"/heatmap_RNA_round2/MEL_gene_and_cRE_RNA_ATAC_and_H3K27ac_dynamics.Rdata"))
+KRT_cRE_dynamics = readRDS(paste0(Dir,"/heatmap_RNA_round2/KRT_gene_and_cRE_RNA_ATAC_and_H3K27ac_dynamics.Rdata"))
+FRB_cRE_dynamics = readRDS(paste0(Dir,"/heatmap_RNA_round2/FRB_gene_and_cRE_RNA_ATAC_and_H3K27ac_dynamics.Rdata"))
+bed <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/chromatin/RegulatoryElements/TSS_upstream500bp/TSS_upstream500window_alltranscripts.bed")
+colnames(bed) <- c("chr","start","end","region_gene","region","gene","celltype","regiontype")
+df3 = readRDS(paste0(Dir,"/heatmap_RNA_round2/enhancer_count_by_gene.rds"))
+
+
+```
+
+## plot heatmap to check which clusters are commonly induced promoters
+```{r plot}
+# km_res.rna.new variable is loaded in line28 from script heatmap_RNA_round2/3cts_interactive_heatmap_RNAseq_ATACseq_ChIPseq_version2.Rmd
+split_instructions.new <- km_res.rna.new$newclass
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap.new <- km_res.rna.new[,1:ncol(CPM_rna_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap.new %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap.new) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap.new)[row_anno_index]
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM.heatmap.new) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  celltype = colnames(zlogCPM.heatmap.new) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+pdf(paste0(outDir,"/heatmap_reordered_RNAseq_DEgenes_14kmm-hc_padj0.05_log2FC1.5_avgCPM10.pdf"),width=24,height=30)
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap.new, 
+                            name = "z-score log2CPM",
+                            top_annotation = column_ha,
+                            right_annotation = row_ha,
+                            column_title = "DE genes in 3 celltypes, control vs IGNg stimulated, known IFNg inducible genes labeled",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(colnames(CPM_rna_DEG)[grepl("PBS_KRT",colnames(CPM_rna_DEG))])), 
+                                             rep(2,length(colnames(CPM_rna_DEG)[grepl("PBS_MEL",colnames(CPM_rna_DEG))])), 
+                                             rep(3,length(colnames(CPM_rna_DEG)[grepl("PBS_FRB",colnames(CPM_rna_DEG))])), 
+                                             rep(4,length(colnames(CPM_rna_DEG)[grepl("IFN_KRT",colnames(CPM_rna_DEG))])), 
+                                             rep(5,length(colnames(CPM_rna_DEG)[grepl("IFN_MEL",colnames(CPM_rna_DEG))])),
+                                             rep(6,length(colnames(CPM_rna_DEG)[grepl("IFN_FRB",colnames(CPM_rna_DEG))]))),
+                            row_split = split_instructions.new, 
+                            show_row_names = FALSE,
+                            row_title_rot = 0,
+                            column_names_rot = 45,
+                            row_gap = unit(0, "mm"),
+                            border = TRUE,
+                            column_names_gp = gpar(fontsize = 10),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+
+
+```
+
+# Cluster 1-3 are genes with low expression in PBS, but are highly induced upon IFNg in all three cell types.
+## save promoters of commonly induced promoters
+```{r fetch}
+# get gene list
+gene_list <- c()
+for (i in c(1,2,3)){
+ this_cluster_genes = rownames(km_res.rna.new)[which(km_res.rna.new$newclass==i)]
+ gene_list <- c(gene_list, this_cluster_genes)
+}
+
+# get promoter list
+promoter_df <- bed %>% dplyr::filter(gene %in% gene_list)
+
+# only pick promoters that exist in all three cell types
+promoter_list <- table( promoter_df[,c("region")]) %>% as.data.frame() %>% dplyr::filter(Freq==3) %>% pull(region) %>% as.character()
+# 187 out of 263 genes have at least 1 promoter that's active in all three celltypes
+# link_gene_promoter %>% dplyr::filter(gene %in% gene_list & region %in% promoter_list) %>% pull(gene) %>% unique() %>% length()
+
+# save promoter list
+write(promoter_list, file=paste0(outDir,"/commonly_induced_promoters.txt"))
+
+# fetch bedfile
+bed <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/chromatin/RegulatoryElements/method3/regulatory_regions.bed")
+colnames(bed) <- c("chr","start","end","region")
+promoter_bed <- bed %>% dplyr::filter(region %in% promoter_list)
+data.table::fwrite(promoter_bed, file=paste0(outDir,"/commonly_induced_promoters.bed"),quote=F, sep="\t",col.names=F, row.names=F)
+```
+
+
+# Cluster 10 is melanocyte-specifically-induced gene cluster. It's the only cluster that has low expression in all celltypes in PBS but specifically induced in one cell type upon IFNg.
+```{r fetch-cluster10-promoter}
+# get gene list, 81 genes
+gene_list <- c()
+for (i in 10){
+ this_cluster_genes = rownames(km_res.rna.new)[which(km_res.rna.new$newclass==i)]
+ gene_list <- c(gene_list, this_cluster_genes)
+}
+
+# get promoter list. 83 unique promoters.
+promoter_df <- link_gene_promoter %>% dplyr::filter(gene %in% gene_list)
+
+freq_df <- table(promoter_df[,c("region")]) %>% as.data.frame()
+table(freq_df$Freq)
+# 34 promoters are only in 1 celltype (25 are in MEL), 16 promoters are in 2 celltypes, and 33 promoters are in all celltypes.
+View(promoter_df[which(promoter_df$region %in% freq_df[which(freq_df$Freq==1),"region"]),])
+View(promoter_df[which(promoter_df$region %in% freq_df[which(freq_df$Freq==2),"region"]),])
+
+
+# promoters in only melanocytes
+temp <- table( promoter_df[,c("region")]) %>% as.data.frame() %>% dplyr::filter(Freq==1) %>% pull(region) %>% as.character()
+promoter_list <- promoter_df %>% dplyr::filter(region %in% temp & celltype=="MEL") %>% pull(region) %>% unique()
+promoter_bed <- bed %>% dplyr::filter(region %in% promoter_list)
+data.table::fwrite(promoter_bed, file=paste0(outDir,"/MEL_specifically_induced_promoters.bed"),quote=F, sep="\t",col.names=F, row.names=F)
+
+```
+

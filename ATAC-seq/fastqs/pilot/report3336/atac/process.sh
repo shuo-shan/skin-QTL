@@ -1,0 +1,1 @@
+bedtools slop -b 1000 -g /share/data/umw_biocore/genome_data/human/hg19/hg19.chrom.sizes -i filt_atac_annotated.tsv | bedtools intersect -wa -wb -header -a stdin -b ld_snp_hg19_skin_diseases.tsv | cut -f 11 | sort | uniq > snps_around_1kb_atac

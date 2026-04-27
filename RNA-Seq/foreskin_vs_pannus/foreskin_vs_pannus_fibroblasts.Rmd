@@ -1,0 +1,35 @@
+---
+title: "foreskin_vs_pannus"
+author: "Crystal Shan"
+date: "2024-03-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## main data processing
+### Load packages  
+```{r package, warning=FALSE}
+library(tidyverse)
+library(DESeq2)
+library(BiocParallel)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(gridExtra)
+library(ggpubr)
+library(plotly)
+library(RCurl)
+library(ComplexHeatmap)
+
+Dir="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/foreskin_vs_pannus"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment_main.RData'))
+#load(paste0(Dir,'/myEnvironment_main.RData'))
+```

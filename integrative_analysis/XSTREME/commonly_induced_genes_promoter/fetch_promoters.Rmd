@@ -1,0 +1,295 @@
+---
+title: "commonly-induced-vs-cellTypeSpecicallyInduced-promoters"
+author: "Crystal Shan"
+date: "2024-02-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages  
+```{r package, warning=FALSE, include=FALSE}
+library(dplyr)
+library(magrittr)
+library(tidyverse)
+library(gplots)
+library(ggfortify)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(ggpubr)
+library(DESeq2)
+library(ComplexHeatmap)
+
+Dir="~/Downloads/nl/human/skin/eQTLs/integrative_analysis"
+setwd(Dir)
+
+outDir="~/Downloads/nl/human/skin/eQTLs/integrative_analysis/XSTREME/commonly_induced_genes_promoter"
+
+load(paste0(Dir,"/heatmap_RNA_round2/myEnvironment_heatmap_RNAseq_DEgenes_14kmm-hc_04182023_padj0.05_log2FC1.5_avgCPM10.RData"))
+res.atac.dds.frb = readRDS("~/Downloads/nl/human/skin/eQTLs/ATACseq_DolphinNext/DESeq2/DESeq2_results_ATACseq_peaks_1kb_FRB.Rdata")
+res.atac.dds.krt = readRDS("~/Downloads/nl/human/skin/eQTLs/ATACseq_DolphinNext/DESeq2/DESeq2_results_ATACseq_peaks_1kb_KRT.Rdata")
+res.atac.dds.mel = readRDS("~/Downloads/nl/human/skin/eQTLs/ATACseq_DolphinNext/DESeq2/DESeq2_results_ATACseq_peaks_1kb_MEL.Rdata")
+res.chip.dds.frb = readRDS("~/Downloads/nl/human/skin/eQTLs/ChIP-seq/DESeq2/DESeq2_results_H3K27acChIPseq_peaks_1kb_FRB.Rdata")
+res.chip.dds.krt = readRDS("~/Downloads/nl/human/skin/eQTLs/ChIP-seq/DESeq2/DESeq2_results_H3K27acChIPseq_peaks_1kb_KRT.Rdata")
+res.chip.dds.mel = readRDS("~/Downloads/nl/human/skin/eQTLs/ChIP-seq/DESeq2/DESeq2_results_H3K27acChIPseq_peaks_1kb_MEL.Rdata")
+link_gene_promoter = readRDS(paste0(Dir,"/heatmap_RNA_round2/link_gene_promoter_within_300kbp_of_TSS_allcts.Rdata"))
+link_gene_enhancer = readRDS(paste0(Dir,"/heatmap_RNA_round2/link_gene_enhancer_within_300kbp_of_TSS_allcts.Rdata"))
+FRB_cRE_dynamics = readRDS(paste0(Dir,"/heatmap_RNA_round2/FRB_gene_and_cRE_RNA_ATAC_and_H3K27ac_dynamics.Rdata"))
+MEL_cRE_dynamics = readRDS(paste0(Dir,"/heatmap_RNA_round2/MEL_gene_and_cRE_RNA_ATAC_and_H3K27ac_dynamics.Rdata"))
+KRT_cRE_dynamics = readRDS(paste0(Dir,"/heatmap_RNA_round2/KRT_gene_and_cRE_RNA_ATAC_and_H3K27ac_dynamics.Rdata"))
+FRB_cRE_dynamics = readRDS(paste0(Dir,"/heatmap_RNA_round2/FRB_gene_and_cRE_RNA_ATAC_and_H3K27ac_dynamics.Rdata"))
+bed <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/chromatin/RegulatoryElements/method3/regulatory_regions.bed")
+colnames(bed) <- c("chr","start","end","region")
+df3 = readRDS(paste0(Dir,"/heatmap_RNA_round2/enhancer_count_by_gene.rds"))
+```
+
+## plot heatmap to check which clusters are commonly induced promoters
+```{r plot}
+# km_res.rna.new variable is loaded in line28 from script heatmap_RNA_round2/3cts_interactive_heatmap_RNAseq_ATACseq_ChIPseq_version2.Rmd
+split_instructions.new <- km_res.rna.new$newclass
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap.new <- km_res.rna.new[,1:ncol(CPM_rna_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap.new %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap.new) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap.new)[row_anno_index]
+
+# 5. plot heatmap
+column_ha = HeatmapAnnotation(
+  condition = colnames(zlogCPM.heatmap.new) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  celltype = colnames(zlogCPM.heatmap.new) %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  col = list(condition = c("PBS" = "black", "IFN" = "#FA8072"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+pdf(paste0(outDir,"/heatmap_reordered_RNAseq_DEgenes_14kmm-hc_padj0.05_log2FC1.5_avgCPM10.pdf"),width=24,height=30)
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap.new, 
+                            name = "z-score log2CPM",
+                            top_annotation = column_ha,
+                            right_annotation = row_ha,
+                            column_title = "DE genes in 3 celltypes, control vs IGNg stimulated, known IFNg inducible genes labeled",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(colnames(CPM_rna_DEG)[grepl("PBS_KRT",colnames(CPM_rna_DEG))])), 
+                                             rep(2,length(colnames(CPM_rna_DEG)[grepl("PBS_MEL",colnames(CPM_rna_DEG))])), 
+                                             rep(3,length(colnames(CPM_rna_DEG)[grepl("PBS_FRB",colnames(CPM_rna_DEG))])), 
+                                             rep(4,length(colnames(CPM_rna_DEG)[grepl("IFN_KRT",colnames(CPM_rna_DEG))])), 
+                                             rep(5,length(colnames(CPM_rna_DEG)[grepl("IFN_MEL",colnames(CPM_rna_DEG))])),
+                                             rep(6,length(colnames(CPM_rna_DEG)[grepl("IFN_FRB",colnames(CPM_rna_DEG))]))),
+                            row_split = split_instructions.new, 
+                            show_row_names = FALSE,
+                            row_title_rot = 0,
+                            column_names_rot = 45,
+                            row_gap = unit(0, "mm"),
+                            border = TRUE,
+                            column_names_gp = gpar(fontsize = 10),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+
+
+```
+
+# Cluster 1-3 are genes with low expression in PBS, but are highly induced upon IFNg in all three cell types.
+## save promoters of commonly induced promoters
+```{r fetch}
+# get gene list
+gene_list <- c()
+for (i in c(1,2,3)){
+ this_cluster_genes = rownames(km_res.rna.new)[which(km_res.rna.new$newclass==i)]
+ gene_list <- c(gene_list, this_cluster_genes)
+}
+
+# get promoter list
+promoter_df <- link_gene_promoter %>% dplyr::filter(gene %in% gene_list)
+
+# only pick promoters that exist in all three cell types
+promoter_list <- table( promoter_df[,c("region")]) %>% as.data.frame() %>% dplyr::filter(Freq==3) %>% pull(region) %>% as.character()
+# 187 out of 263 genes have at least 1 promoter that's active in all three celltypes
+# link_gene_promoter %>% dplyr::filter(gene %in% gene_list & region %in% promoter_list) %>% pull(gene) %>% unique() %>% length()
+
+# save promoter list
+write(promoter_list, file=paste0(outDir,"/commonly_induced_promoters.txt"))
+
+# fetch bedfile
+promoter_bed <- bed %>% dplyr::filter(region %in% promoter_list)
+data.table::fwrite(promoter_bed, file=paste0(outDir,"/commonly_induced_promoters.bed"),quote=F, sep="\t",col.names=F, row.names=F)
+```
+## analysis5: targets being the commonly induced genes’ promoters that gain H3K27ac signal
+```{r target_analysis5}
+# get gene list
+gene_list <- c()
+for (i in c(1,2,3)){
+ this_cluster_genes = rownames(km_res.rna.new)[which(km_res.rna.new$newclass==i)]
+ gene_list <- c(gene_list, this_cluster_genes)
+}
+
+# get promoter list
+promoter_df <- link_gene_promoter %>% dplyr::filter(gene %in% gene_list)
+
+# only pick promoters that gain H3K27ac signal in at least 1 celltype. 517 regions.
+MEL_cRE_dynamics[which(MEL_cRE_dynamics$region %in% promoter_df$region),]$DK27ac
+
+temp1 <- MEL_cRE_dynamics %>% dplyr::filter(region %in% promoter_df$region & DK27ac=="gainH3K27ac") %>% pull(region)
+temp2 <- KRT_cRE_dynamics %>% dplyr::filter(region %in% promoter_df$region & DK27ac=="gainH3K27ac") %>% pull(region)
+temp3 <- FRB_cRE_dynamics %>% dplyr::filter(region %in% promoter_df$region & DK27ac=="gainH3K27ac") %>% pull(region)
+
+promoter_df <- link_gene_promoter %>% 
+  dplyr::filter(gene %in% gene_list) %>%
+  dplyr::filter(region %in% unique(c(temp1, temp2, temp3)))
+
+# save promoter list
+write(promoter_list, file=paste0(outDir,"/commonly_induced_promoters_that_gained_H3K27ac.txt"))
+
+# fetch bedfile
+promoter_bed <- bed %>% dplyr::filter(region %in% promoter_list)
+data.table::fwrite(promoter_bed, file=paste0(outDir,"/commonly_induced_promoters_that_gained_H3K27ac.bed"),quote=F, sep="\t",col.names=F, row.names=F)
+
+```
+
+# negative controls
+## negCtrl 1: random shuffle
+## negCtrl 2: all lowly expressed genes in PBS in 3 celltypes and no induction in IFN
+## negCtrl 3: all heatmap genes except for cluster1-3 genes
+```{r negCtrl3}
+# get negative control genes
+negCtrl_genes <- c()
+for (i in c(4:14)){
+ this_cluster_genes = rownames(km_res.rna.new)[which(km_res.rna.new$newclass==i)]
+ negCtrl_genes <- c(negCtrl_genes, this_cluster_genes)
+}
+
+# get promoter list: 1078 promoters. don't care about which celltype express it
+promoter_df <- link_gene_promoter %>% dplyr::filter(gene %in% negCtrl_genes)
+promoter_list <- promoter_df  %>% pull(region) %>% as.character() %>% unique()
+
+# save promoter list
+write(promoter_list, file=paste0(outDir,"/commonly_induced_promoters_negCtrl_analysis3.txt"))
+
+# fetch bedfile
+promoter_bed <- bed %>% dplyr::filter(region %in% promoter_list)
+data.table::fwrite(promoter_bed, file=paste0(outDir,"/commonly_induced_promoters_negCtrl_analysis3.bed"),quote=F, sep="\t",col.names=F, row.names=F)
+
+```
+## negCtrl 4: all non-induced genes whose average PBS levels across 3 celltypes match that of the target genes.
+```{r negCtrl4}
+# get target gene mean PBS expression for each celltype
+# get gene list
+gene_list <- c()
+for (i in c(1,2,3)){
+ this_cluster_genes = rownames(km_res.rna.new)[which(km_res.rna.new$newclass==i)]
+ gene_list <- c(gene_list, this_cluster_genes)
+}
+targetExprs_PBS_MEL <- CPM_rna[gene_list,] %>% dplyr::select(ends_with("_PBS_MEL")) %>% apply( . , 1, mean)
+targetExprs_PBS_KRT <- CPM_rna[gene_list,] %>% dplyr::select(ends_with("_PBS_KRT")) %>% apply( . , 1, mean)
+targetExprs_PBS_FRB <- CPM_rna[gene_list,] %>% dplyr::select(ends_with("_PBS_FRB")) %>% apply( . , 1, mean)
+
+# get all non-induced genes
+all_genes <- rownames(CPM_rna)
+nonInduced_genes <- all_genes[which(!all_genes %in% rownames(km_res.rna.new))]
+CPM_rna_nonInduced <- CPM_rna[nonInduced_genes,]
+CPM_rna_nonInduced$meanPBSexprs.MEL <- CPM_rna_nonInduced %>% dplyr::select(contains("_PBS_MEL")) %>% rowMeans()
+CPM_rna_nonInduced$meanPBSexprs.KRT <- CPM_rna_nonInduced %>% dplyr::select(contains("_PBS_KRT")) %>% rowMeans()
+CPM_rna_nonInduced$meanPBSexprs.FRB <- CPM_rna_nonInduced %>% dplyr::select(contains("_PBS_FRB")) %>% rowMeans()
+
+# get negative control genes (i.e. non-induced genes with similar PBS expression)
+# at 10% threshold, 120 genes out of 263 don't have a negative control gene
+# at 20% threshold, 42 genes out of 263 don't have a negative control gene
+# at 30% threshold, 8 genes out of 263 don't have a negative control gene
+# at 35% threshold, 4 genes out of 263 don't have a negative control gene
+negCtrl_genes <- c()
+for (target_gene in gene_list) {
+  threshold <- 0.30
+  # MEL
+  target_PBSmean <- CPM_rna[target_gene,] %>% dplyr::select(contains("_PBS_MEL")) %>% rowMeans()
+  this_negCtrl_genes_MEL <- CPM_rna_nonInduced %>% 
+    dplyr::filter(meanPBSexprs.MEL >= (target_PBSmean - (target_PBSmean * threshold))  & 
+                    meanPBSexprs.MEL <= (target_PBSmean + (target_PBSmean * threshold))) %>%
+    rownames_to_column("gene") %>% pull(gene)
+  # KRT
+    target_PBSmean <- CPM_rna[target_gene,] %>% dplyr::select(contains("_PBS_KRT")) %>% rowMeans()
+  this_negCtrl_genes_KRT <- CPM_rna_nonInduced %>% 
+    dplyr::filter(meanPBSexprs.KRT >= (target_PBSmean - (target_PBSmean * threshold))  &  
+                    meanPBSexprs.KRT <= (target_PBSmean + (target_PBSmean * threshold))) %>%
+    rownames_to_column("gene") %>% pull(gene)
+    # FRB
+    target_PBSmean <- CPM_rna[target_gene,] %>% dplyr::select(contains("_PBS_FRB")) %>% rowMeans()
+  this_negCtrl_genes_FRB <- CPM_rna_nonInduced %>% 
+    dplyr::filter(meanPBSexprs.FRB >= (target_PBSmean - (target_PBSmean * threshold))  &  
+                    meanPBSexprs.FRB <= (target_PBSmean + (target_PBSmean * threshold))) %>%
+    rownames_to_column("gene") %>% pull(gene)
+  
+  # build negative control genes and pick one
+  this_negCtrl_genes <- intersect(this_negCtrl_genes_FRB, intersect(this_negCtrl_genes_KRT, this_negCtrl_genes_MEL))
+  if (length(this_negCtrl_genes) > 0) {
+    this_sample <- sample(this_negCtrl_genes,1)
+    # if the neg control set ALL exist in the main negCtrl set, then randomly pick one and add to the main list
+    if ( all(this_negCtrl_genes %in% negCtrl_genes)) {
+      negCtrl_genes <- c(negCtrl_genes, this_sample)
+    } else {
+      # otherwise, pick a random gene from this target's negCtrl set that hasn't been picked, and add to main list
+      while (this_sample %in% negCtrl_genes) {
+          this_sample <- sample(this_negCtrl_genes,1)
+      }
+      negCtrl_genes <- c(negCtrl_genes, this_sample)
+    }
+  } else {
+    negCtrl_genes <- c(negCtrl_genes, NA)
+  }
+}
+
+negCtrl_genes <- negCtrl_genes %>% na.omit()
+
+# get promoter list: 1078 promoters. don't care about which celltype express it
+promoter_df <- link_gene_promoter %>% dplyr::filter(gene %in% negCtrl_genes)
+promoter_list <- promoter_df  %>% pull(region) %>% as.character() %>% unique()
+
+# save promoter list
+write(promoter_list, file=paste0(outDir,"/commonly_induced_promoters_negCtrl_analysis4.txt"))
+
+# fetch bedfile
+promoter_bed <- bed %>% dplyr::filter(region %in% promoter_list)
+data.table::fwrite(promoter_bed, file=paste0(outDir,"/commonly_induced_promoters_negCtrl_analysis4.bed"),quote=F, sep="\t",col.names=F, row.names=F)
+
+```
+## negCtrl 5: all commonly induced genes' promoters that DO NOT gain H3K27ac signal in any celltype
+```{r negCtrl5}
+# get gene list
+gene_list <- c()
+for (i in c(1,2,3)){
+ this_cluster_genes = rownames(km_res.rna.new)[which(km_res.rna.new$newclass==i)]
+ gene_list <- c(gene_list, this_cluster_genes)
+}
+
+# get promoter list
+promoter_df <- link_gene_promoter %>% dplyr::filter(gene %in% gene_list)
+
+# only pick promoters that DON"T gain H3K27ac signal in any celltype. 364 regions.
+temp1 <- MEL_cRE_dynamics %>% dplyr::filter(region %in% promoter_df$region & DK27ac=="gainH3K27ac") %>% pull(region)
+temp2 <- KRT_cRE_dynamics %>% dplyr::filter(region %in% promoter_df$region & DK27ac=="gainH3K27ac") %>% pull(region)
+temp3 <- FRB_cRE_dynamics %>% dplyr::filter(region %in% promoter_df$region & DK27ac=="gainH3K27ac") %>% pull(region)
+
+promoter_df <- link_gene_promoter %>% 
+  dplyr::filter(gene %in% gene_list) %>%
+  dplyr::filter(! region %in% unique(c(temp1, temp2, temp3)))
+
+# save promoter list
+write(promoter_list, file=paste0(outDir,"/commonly_induced_promoters_negCtrl_analysis5.txt"))
+
+# fetch bedfile
+promoter_bed <- bed %>% dplyr::filter(region %in% promoter_list)
+data.table::fwrite(promoter_bed, file=paste0(outDir,"/commonly_induced_promoters_negCtrl_analysis5.bed"),quote=F, sep="\t",col.names=F, row.names=F)
+```

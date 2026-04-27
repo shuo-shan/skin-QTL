@@ -1,0 +1,202 @@
+---
+title: "vcf_summary"
+author: "Shuo Shan"
+date: "6/21/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load packages  
+```{r package, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(magrittr)
+library(stringr)
+library(ggplot2)
+
+
+Dir="/nl/umw_manuel_garber/human/skin/eQTLs/donor_genotyping/hg38/analysis"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment.RData'))
+load(paste0(Dir,'/myEnvironment.RData'))
+```
+
+### Load files
+```{r function}
+create_table <- function(Dir, file_lst) {
+  f=file_lst[1]
+  sample=gsub("\\.snp\\.txt","",f)
+  df <- read.table(paste0(Dir,"/",f), sep="\t", header=FALSE) %>% 
+    dplyr::select(c("V1","V8")) %>% 
+    magrittr::set_colnames(c("varID",sample)) %>%
+    distinct_at(.,"varID",.keep_all=TRUE)
+  
+  for (f in file_lst[2:length(file_lst)]) {
+    sample=gsub("\\.snp\\.txt","",f); df.this <- read.table(paste0(Dir,"/",f), sep="\t", header=FALSE) %>%
+      dplyr::select(c("V1","V8")) %>%
+      magrittr::set_colnames(c("varID",sample)) %>% distinct_at(.,"varID",.keep_all=TRUE); df <- dplyr::left_join(df,df.this,by="varID") %>% distinct_at(.,"varID",.keep_all=TRUE)
+  }
+  df <- df %>% tibble::column_to_rownames( . , "varID")
+  return(df)
+  rm(f,sample,df,df.this)
+}
+
+```
+```{r load-file}
+# 1. import genotype text file into one table
+flst <- list.files(path = Dir, pattern = "snp.txt")
+df <- create_table(Dir, flst) 
+samples=flst %>% gsub(".snp.txt","",.)
+
+# 2. summarize table.
+res=data.frame()
+for(snp in rownames(df)) {
+  this.df=t(df[snp,]) %>% as.character()
+  direct_call=sum(str_count(this.df, "observed"))
+  imputed_passed=sum(str_count(this.df, "imputed_passed"))
+  imputed_failed=sum(str_count(this.df, "imputed_failed"))
+  
+  this.df2=data.frame(varID=snp,
+                      direct_call=direct_call,
+                      imputed_passed=imputed_passed,
+                      imputed_failed=imputed_failed)
+  res=rbind(res,this.df2)
+}
+res.long=pivot_longer(res,c("direct_call","imputed_passed","imputed_failed"),names_to="genotype")
+res.long$genotype=ordered(res.long$genotype,levels=c("direct_call","imputed_passed","imputed_failed"))
+# 3. plot summary
+# ggplot(res.long, aes(x = varID, y = value, color = genotype, fill = genotype, label = value)) +
+#   geom_bar(stat = "identity",width=0.80) +
+#   geom_text(aes(label=value,colour=genotype),size = 2.5, position = position_stack(vjust = 0.5)) +
+#   scale_color_manual(values=c("darkblue", "darkgreen", "black")) +
+#   scale_fill_manual(values=c("lightblue", "lightgreen", "lightgrey")) +
+#   theme_minimal() +
+#   xlab("") + ylab("") +
+#   theme(legend.position="bottom") +
+#   coord_flip() +
+#   labs(title="number of donors with SNP genotype calls across 46 common vitiligo SNPs",
+#        plot.title=element_text(size=6))
+
+
+# 4. summarize table per patient
+res2=data.frame()
+for(donor in colnames(df)) {
+  this.df=t(df[,donor]) %>% as.character()
+  direct_call=sum(str_count(this.df, "observed"))
+  imputed_passed=sum(str_count(this.df, "imputed_passed"))
+  imputed_failed=sum(str_count(this.df, "imputed_failed"))
+  
+  this.df2=data.frame(donor=donor,
+                      direct_call=direct_call,
+                      imputed_passed=imputed_passed,
+                      imputed_failed=imputed_failed)
+  res2=rbind(res2,this.df2)
+}
+res2.long=pivot_longer(res2,c("direct_call","imputed_passed","imputed_failed"),names_to="genotype")
+res2.long$genotype=ordered(res2.long$genotype,levels=c("direct_call","imputed_passed","imputed_failed"))
+
+# 5. plot summary
+# ggplot(res2.long, aes(x = donor, y = value, color = genotype, fill = genotype, label = value)) +
+#   geom_bar(stat = "identity",width=0.80) +
+#   geom_text(aes(label=value,colour=genotype),size = 2.5, position = position_stack(vjust = 0.5)) +
+#   scale_color_manual(values=c("darkblue", "darkgreen", "black")) +
+#   scale_fill_manual(values=c("lightblue", "lightgreen", "lightgrey")) +
+#   theme_minimal() +
+#   xlab("") + ylab("") +
+#   theme(legend.position="bottom") +
+#   coord_flip() +
+#   labs(title="genotype quality for 46 common vitiligo SNPs per donor",
+#        plot.title=element_text(size=6))
+
+res3=res2
+res3$good=res3$direct_call+res3$imputed_passed
+# min(res3$good)
+# median(res3$good)
+# max(res3$good)
+# 
+# min(res3$direct_call)
+# median(res3$direct_call)
+# max(res3$direct_call)
+# 
+# min(res3$imputed_passed)
+# median(res3$imputed_passed)
+# max(res3$imputed_passed)
+
+# 6. load coverage per donor
+cov=read.table(paste0(Dir,"/coverage_by_donor.txt"),header=FALSE)
+colnames(cov)=c("donor","coverage")
+cov$coverage=as.numeric(cov$coverage)
+
+res4=left_join(res2,cov,by="donor") %>% dplyr::arrange(coverage)
+
+res4.long=res4 %>% pivot_longer(.,c("direct_call","imputed_passed","imputed_failed"),names_to="genotype")
+res4.long$genotype=ordered(res4.long$genotype,levels=c("direct_call","imputed_passed","imputed_failed"))
+res4.long$donor2=paste0(as.character(format(round(res4.long$coverage,digits=2),nsmall=2)),"X  ",res4.long$donor)
+
+pdf(file="genotype_quality_by_donor_skindisease_SNPs_MAF>0.4.pdf",width=12,height=6.6,)
+res4.long %>% arrange(coverage) %>%
+ggplot(., aes(y = donor2, x = value, color = genotype, fill = genotype, label = value)) +
+  geom_bar(stat = "identity",width=0.80) +
+  geom_text(aes(label=value,colour=genotype),size = 2.5, position = position_stack(vjust = 0.5)) +
+  scale_color_manual(values=c("darkblue", "darkgreen", "black")) +
+  scale_fill_manual(values=c("lightblue", "lightgreen", "lightgrey")) +
+  theme_minimal() +
+  xlab("") + ylab("") +
+  theme(legend.position="bottom") +
+  theme(axis.text.y=element_text(hjust=0)) +
+  labs(title="genotype quality for 465 skin-disease SNPs with MAF >0.4 per donor ranked by WGS coverage",
+       plot.title=element_text(size=6))
+dev.off()
+```
+
+### Load per donor genome-wide summary
+```{r genomewide}
+# 1. make data table
+summary_genomewide=read.table(file="/nl/umw_manuel_garber/human/skin/eQTLs/donor_genotyping/hg38/vcf/organized/summary.txt",header=FALSE, sep="\t") %>% set_colnames(c("donor","all","high_confidence","imputed_failed"))
+summary_genomewide$imputed_passed=summary_genomewide$all - summary_genomewide$high_confidence - summary_genomewide$imputed_failed
+summary_genomewide=right_join(summary_genomewide, cov, by="donor") %>% dplyr::arrange(coverage)
+summary_genomewide$donor2=paste0(as.character(format(round(summary_genomewide$coverage,digits=2),nsmall=2)),"X  ",summary_genomewide$donor)
+# 2. pivot table to long format
+summary_genomewide_long=summary_genomewide %>% pivot_longer(.,c("high_confidence","imputed_passed","imputed_failed"),names_to="genotype")
+summary_genomewide_long$genotype=ordered(summary_genomewide_long$genotype,
+                                        levels=c("high_confidence","imputed_passed","imputed_failed"))
+summary_genomewide_long$donor2=paste0(as.character(format(round(summary_genomewide_long$coverage,digits=2),nsmall=2)),"X  ",summary_genomewide_long$donor)
+
+
+
+# 3. make bar plot ranked by coverage
+pdf(file="genotype_quality_by_donor_all_variants_coverage_ranked.pdf",width=12,height=6.6,)
+summary_genomewide_long %>% arrange(coverage) %>%
+ggplot(., aes(y = donor2, x = value, color = genotype, fill = genotype, label = value)) +
+  geom_bar(stat = "identity",width=0.80) +
+  geom_text(aes(label=value,colour=genotype),size = 2, position = position_stack(vjust = 0.5)) +
+  #geom_label(aes(label=value,colour=genotype),size = 1,position = position_stack(vjust = 0.5),label.padding = unit(0.25, "lines")) +
+  scale_color_manual(values=c("darkblue", "darkgreen", "black")) +
+  scale_fill_manual(values=c("lightblue", "lightgreen", "lightgrey")) +
+  theme_minimal() +
+  xlab("") + ylab("") +
+  theme(legend.position="bottom") +
+  theme(axis.text.y=element_text(hjust=0)) +
+  labs(title="genotype quality for all 64,109,737 snps profilable in Gencove data, ranked by WGS coverage",
+       plot.title=element_text(size=6))
+dev.off()
+
+
+pdf(file="number_of_snps_that_failed_imputation_by_donors_ranked_by_coverage.pdf",width=12,height=6.6,)
+summary_genomewide %>% arrange(coverage) %>%
+ggplot(., aes(y = donor2, x = imputed_failed, label=imputed_failed)) +
+  geom_bar(stat = "identity",width=0.80, fill="lightgrey") +
+  geom_text(aes(label=imputed_failed),size = 2.5, position = position_stack(vjust = 0.5)) +
+  theme_minimal() +
+  xlab("") + ylab("") +
+  theme(legend.position="bottom") +
+  theme(axis.text.y=element_text(hjust=0)) +
+  labs(title="No. of SNPs that failed imputation out of 64,109,737 snps in Gencove data, ranked by coverage",
+       plot.title=element_text(size=6))
+dev.off()
+
+```

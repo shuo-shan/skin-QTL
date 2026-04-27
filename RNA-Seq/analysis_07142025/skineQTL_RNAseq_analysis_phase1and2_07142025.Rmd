@@ -1,0 +1,2852 @@
+```{r package, warning=FALSE}
+library(tidyverse)
+library(DESeq2)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggfortify)
+library(gridExtra)
+library(ggpubr)
+library(ComplexHeatmap)
+library(circlize)
+library(cowplot)
+library(ggbeeswarm)
+library(sva)
+library(clusterProfiler)
+library(plotly)
+library(Mfuzz)
+library(Biobase)
+library(org.Hs.eg.db)  
+library(enrichplot)
+
+
+Dir="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/analysis_07142025/"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment_main.RData'))
+load(paste0(Dir,"/myEnvironment_main.RData")) # raw counts, CPM, log2(CPM+1), metadata, expressed genes by ct, dds object for each ct
+
+# load meta genes to gene name dictionary
+metagene_dict <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/metaidname.txt") %>% 
+  dplyr::select(-id) %>% distinct()
+metagene_dict_collapsed <- metagene_dict %>% group_by(meta) %>% 
+  summarize(source=paste(name,collapse=','))
+```
+
+```{r functions}
+# useful function
+convert_meta_genes <- function(gene_vector) {
+  # Identify meta genes in the input vector
+  meta_genes <- gene_vector[grepl("meta", gene_vector)]
+  non_meta_genes <- gene_vector[!grepl("meta", gene_vector)]
+  
+  # Convert meta genes to actual gene names using metagene_dict
+  meta_to_gene <- metagene_dict$name[metagene_dict$meta %in% meta_genes]
+  
+  # Combine non-meta genes and converted meta genes, ensuring uniqueness
+  converted_genes <- unique(c(non_meta_genes, meta_to_gene))
+  
+  return(converted_genes)
+}
+niceKmeans <-function (df, k, kmeans.algorithm = "Lloyd", iter.max = 1000, nstart=100) {
+  
+  result = data.frame();
+  source = t(scale(t(df)));
+  kmeans = kmeans(source, centers = k, iter.max = iter.max, algorithm=kmeans.algorithm, nstart=nstart);
+  clustered = data.frame();
+  breaks = c();
+  for (i in 1:k) {
+    print(sprintf("Doing cluster %i",i))
+    cluster = source[kmeans$cluster==i,];
+    rows = row.names(cluster);
+    clust = heatmap.2(as.matrix(cluster), distfun=function(x) as.dist((1-cor(t(x)))/2))
+    cluster.ordered = cluster[clust$rowInd,];
+    cluster.ordered.genes = rows[clust$rowInd];
+    row.names(cluster.ordered) = cluster.ordered.genes;
+    class = data.frame(row.names=cluster.ordered.genes);
+    class[,"class"] = i 
+    cluster.ordered = cbind(cluster.ordered, class);
+    clustered = rbind(clustered, cluster.ordered);
+    if(i > 1 & i < k) {
+      breaks[i] = as.numeric(breaks[i-1]) + length(rows);
+    } else if(i==1) {
+      breaks[i] = length(rows);
+    }
+  }
+  
+  result <- list();
+  result$clustered <- clustered;
+  result$breaks <- breaks;
+  return(result);
+}
+create_table <- function(Dir, file_lst) {
+  f=file_lst[1]
+  sample=gsub("_sorted_esat\\.txt\\.gene\\.txt","",f)
+  df <- read.table(paste0(Dir,"/",f), sep="\t", header=TRUE) %>% 
+    tidyr::unite( .,"region",c("Symbol","chr","strand"),sep=";",remove=TRUE) %>% 
+    mutate(sum=rowSums(select_if(., is.numeric))) %>%
+    dplyr::select(c("region",sum)) %>% 
+    magrittr::set_colnames(c("region",sample))
+  
+  if (length(file_lst) > 1) {
+    for (f in file_lst[2:length(file_lst)]) {
+      sample=gsub("_sorted_esat\\.txt\\.gene\\.txt","",f)
+      df.this <- read.table(paste0(Dir,"/",f), sep="\t", header=TRUE) %>% 
+        tidyr::unite( .,"region",c("Symbol","chr","strand"),sep=";",remove=TRUE) %>% 
+        mutate(sum=rowSums(select_if(., is.numeric))) %>%
+        dplyr::select(c("region",sum)) %>% 
+        magrittr::set_colnames(c("region",sample))
+    
+    df <- dplyr::left_join(df,df.this,by="region")
+    }
+  }
+  df <- df %>% tibble::column_to_rownames( . , "region")
+  return(df)
+  rm(f,sample,df,df.this)
+}
+convert_to_entrez <- function(gene_list) {
+  bitr(gene_list, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+}
+convert_from_entrez <- function(id_list) {
+  bitr(id_list, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+}
+
+plot_paired_plot <- function(gene){
+  g=gene
+  df <- data.frame(CPM = as.numeric(t(CPM.clean[g,])), 
+                   sample = colnames(CPM.clean)) %>%
+    left_join(. , metadata[,c("sample","donor","celltype","condition")], by="sample")
+  
+  df.ifng <- df %>% dplyr::filter(condition%in%c("PBS","IFNG"))
+  df.ifnb <- df %>% dplyr::filter(condition%in%c("PBS","IFNB"))
+  df.tnf <- df %>% dplyr::filter(condition%in%c("PBS","TNF"))
+  
+  # make paired plots
+  position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+  line.color = "grey"; linetype = "solid"; palette="bright"
+  
+  p.ifng <- ggplot(df.ifng, create_aes(list(x = "condition", y = "CPM"))) +
+    geom_exec(geom_point, data = df.ifng, color = "condition", size = point.size,
+              position = "jitter") +
+    scale_color_manual(values=c("#999999","#E69F00"))+
+    labs(title=g)+
+    theme(legend.position="none") +
+    facet_wrap(~ celltype)
+  
+  p.ifnb <- ggplot(df.ifnb, create_aes(list(x = "condition", y = "CPM"))) +
+    geom_exec(geom_line, data = df.ifnb, group = "donor",
+              color = line.color, size = line.size, linetype = linetype,
+              position = position) +
+    geom_exec(geom_point, data = df.ifnb, color = "condition", size = point.size,
+              position = position) +
+    scale_color_manual(values=c("#999999","darkgreen"))+
+    labs(title=g)+
+    theme(legend.position="none") +
+    facet_wrap(~ celltype)
+  
+  p.tnf <- ggplot(df.tnf, create_aes(list(x = "condition", y = "CPM"))) +
+    geom_exec(geom_line, data = df.tnf, group = "donor",
+              color = line.color, size = line.size, linetype = linetype,
+              position = position) +
+    geom_exec(geom_point, data = df.tnf, color = "condition", size = point.size,
+              position = position) +
+    scale_color_manual(values=c("#999999","purple"))+
+    labs(title=g)+
+    theme(legend.position="none") +
+    facet_wrap(~ celltype)
+  
+  final_plot <- plot_grid(
+    p.ifng, p.ifnb, p.tnf,
+    nrow = 1, ncol = 3
+  )
+  
+  return(final_plot)
+}
+
+plot_violinbox_plot <- function(gene){
+  g=gene
+  df <- data.frame(CPM = as.numeric(t(CPM.clean[g,])), 
+                   sample = colnames(CPM.clean)) %>%
+    left_join(. , metadata[,c("sample","donor","celltype","condition")], by="sample")
+  
+  df.ifng <- df %>% dplyr::filter(condition%in%c("PBS","IFNG"))
+  df.ifnb <- df %>% dplyr::filter(condition%in%c("PBS","IFNB"))
+  df.tnf <- df %>% dplyr::filter(condition%in%c("PBS","TNF"))
+  
+  # make paired plots
+  position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+  line.color = "grey"; linetype = "solid"; palette="bright"
+  
+  p.ifng <- ggplot(df.ifng, aes(x = condition, y = CPM, fill = condition, color = condition)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "IFNG" = "#E69F00")) +
+    scale_color_manual(values = c("PBS" = "#999999", "IFNG" = "#E69F00")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~celltype)
+  
+  p.ifnb <- ggplot(df.ifnb, aes(x = condition, y = CPM, fill = condition, color = condition)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "IFNB" = "darkgreen")) +
+    scale_color_manual(values = c("PBS" = "#999999", "IFNB" = "darkgreen")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~celltype)
+  
+  p.tnf <- ggplot(df.tnf, aes(x = condition, y = CPM, fill = condition, color = condition)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "TNF" = "purple")) +
+    scale_color_manual(values = c("PBS" = "#999999", "TNF" = "purple")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~celltype)
+  
+  final_plot <- plot_grid(
+    p.ifng, p.ifnb, p.tnf,
+    nrow = 1, ncol = 3
+  )
+  
+  return(final_plot)
+}
+
+plot_violinbox_plot_cytokine_faceted <- function(gene){
+  g=gene
+  df <- data.frame(CPM = as.numeric(t(CPM.clean[g,])), 
+                   sample = colnames(CPM.clean)) %>%
+    left_join(. , metadata[,c("sample","donor","celltype","condition","phase")], by="sample")
+  
+  df$condition <- ordered(df$condition, levels=c("PBS","IFNB","IFNG","TNF"))
+  
+  df.krt <- df %>% dplyr::filter(celltype=="KRT")
+  df.mel <- df %>% dplyr::filter(celltype=="MEL")
+  df.frb <- df %>% dplyr::filter(celltype=="FRB")
+  
+  # make paired plots
+  position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+  line.color = "grey"; linetype = "solid"; palette="bright"
+  
+  p.krt <- ggplot(df.krt, aes(x = celltype, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "KRT" = "#DAF7A6")) +
+    scale_color_manual(values = c("PBS" = "#999999", "KRT" = "#DAF7A6")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+  p.mel <- ggplot(df.mel, aes(x = celltype, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "MEL" = "#C68452")) +
+    scale_color_manual(values = c("PBS" = "#999999", "MEL" = "#C68452")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+    p.frb <- ggplot(df.frb, aes(x = celltype, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "FRB" = "#CCCCFF")) +
+    scale_color_manual(values = c("PBS" = "#999999", "FRB" = "#CCCCFF")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+  final_plot <- plot_grid(
+    p.krt, p.mel, p.frb,
+    nrow = 1, ncol = 3
+  )
+  
+  return(final_plot)
+}
+
+plot_violinbox_plot_cytokine_faceted_by_celltype_grouped_by_phase <- function(gene){
+  g=gene
+  df <- data.frame(CPM = as.numeric(t(CPM.clean[g,])), 
+                   sample = colnames(CPM.clean)) %>%
+    left_join(. , metadata[,c("sample","donor","celltype","condition","phase")], by="sample")
+  
+  df$condition <- ordered(df$condition, levels=c("PBS","IFNB","IFNG","TNF"))
+  
+  df.krt <- df %>% dplyr::filter(celltype=="KRT")
+  df.mel <- df %>% dplyr::filter(celltype=="MEL")
+  df.frb <- df %>% dplyr::filter(celltype=="FRB")
+  
+  # make paired plots
+  position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+  line.color = "grey"; linetype = "solid"; palette="bright"
+  
+  p.krt <- ggplot(df.krt, aes(x = phase, y = CPM, fill = celltype, color = celltype, group = phase)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "KRT" = "#DAF7A6")) +
+    scale_color_manual(values = c("PBS" = "#999999", "KRT" = "#DAF7A6")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+  p.mel <- ggplot(df.mel, aes(x = phase, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "MEL" = "#C68452")) +
+    scale_color_manual(values = c("PBS" = "#999999", "MEL" = "#C68452")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+    p.frb <- ggplot(df.frb, aes(x = phase, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "FRB" = "#CCCCFF")) +
+    scale_color_manual(values = c("PBS" = "#999999", "FRB" = "#CCCCFF")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+  final_plot <- plot_grid(
+    p.krt, p.mel, p.frb,
+    nrow = 1, ncol = 3
+  )
+  
+  return(final_plot)
+}
+```
+## Overview
+Celseq2 RNAseq data from skin-eQTL data. phase1 and phase2 fastq files were processed, aligned, and counted by Via Foundry's ESAT 3.0 pipeline with custom genome with meta genes.
+## load ESAT count tables, compile metadata, and calculate CPM and log2(CPM+1), and filter for expressed genes
+### phase1 samples (no merged samples, lengths vary from 36bp to 56bp)
+```{r load-phase1-countmatrix}
+Dir.esat.list=c("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/DolphinNext/phase1_rerun_customGenome/report10996/ESAT/",
+                "~/Downloads/nl/human/skin/eQTLs/RNA-Seq/DolphinNext/phase1_rerun_customGenome/F44_KRT_PBS/report11029/ESAT/")
+
+counts.phase1.list <- list()
+metadata.phase1.list <- list()
+
+for (i in 1:length(Dir.esat.list)) {
+  # fetch ESAT directory
+  Dir.esat=Dir.esat.list[i]
+  
+  # 1. import ESAT counts into master table
+  flst <- list.files(path = Dir.esat, pattern = "esat.txt.gene.txt")
+  counts <- create_table(Dir.esat, flst) %>% rownames_to_column("key") %>%
+    tidyr::separate("key",into=c("gene",NA,NA),sep=";",remove=TRUE) %>% column_to_rownames("gene")
+  col.sum = data.frame(sample = colnames(counts), samplesum = apply(counts,2,sum))
+  
+  # remove mitochondria genes
+  MTgenes=read.table("~/Downloads/nl/human/skin/eQTLs/literature/UCSC_tracks/Ensembl_GRCh38.105_mitochondrial_genes.txt")
+  counts <- counts %>% mutate(gene=rownames(.)) %>% 
+    dplyr::filter(!rownames(.) %in% MTgenes$V1) %>% dplyr::select(-"gene")
+  dim(counts)
+  
+  # mapping summary
+  info_alignment <- data.table::fread(paste0(Dir.esat,"/../summary/overall_summary.tsv")) %>%
+    set_colnames(c("sample","total_reads","multimapped_reads_aligned","unique_reads_aligned")) %>%
+    left_join( . , col.sum, by="sample") %>%
+    dplyr::mutate(reads_aligned = multimapped_reads_aligned + unique_reads_aligned) %>%
+    dplyr::mutate(all_aligned_reads_over_total = (multimapped_reads_aligned + unique_reads_aligned) / total_reads) %>%
+    dplyr::mutate(unique_aligned_reads_over_total = unique_reads_aligned / total_reads)
+
+  # metadata
+  metadata <- info_alignment
+  
+  # populate large list
+  counts.phase1.list[[i]] <- counts
+  metadata.phase1.list[[i]] <- metadata
+  rm(counts, metadata, info_alignment, col.sum, flst,Dir.esat)
+}
+
+# combine all data frames by column
+counts.phase1 <- do.call(cbind, counts.phase1.list) %>%
+  dplyr::select(-F42_KRT_PBS_S1)# this was accidentally included in the run, but I used NovaSeq data for this sample instead
+
+# import metadata
+temp <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/RNA-Seq/metadata_phase1_selected_metadata_07082025.txt") %>% arrange(sample)
+temp2 <- do.call(rbind, metadata.phase1.list) %>%
+  dplyr::filter(!sample=="F42_KRT_PBS_S1") %>%
+  arrange(sample) %>%
+  mutate(CS2=NA)
+metadata.phase1 <- left_join(temp, temp2, by="sample")
+metadata.phase1 <- metadata.phase1[,c("sample","read_length","donor","celltype","condition","CS2",
+                                      "phase","technical_rep","sequencing_platform",
+                                      "total_reads","multimapped_reads_aligned","unique_reads_aligned",
+                                      "samplesum","reads_aligned","all_aligned_reads_over_total","unique_aligned_reads_over_total")]
+
+rm(counts.phase1.list, metadata.phase1.list, temp, temp2)
+```
+### 56bp
+```{r load-56bp}
+Dir.esat.list=c("~/Downloads/nl/human/skin/eQTLs/Azenta_sequencing/03312025_3ctk_celseq2_atac_batch1/DolphinNext_celseq2/trimmed_FRB/report11013/ESAT/",
+                "~/Downloads/nl/human/skin/eQTLs/Azenta_sequencing/03312025_3ctk_celseq2_atac_batch1/DolphinNext_celseq2/trimmed_MEL/report11012/ESAT/",
+                "~/Downloads/nl/human/skin/eQTLs/Azenta_sequencing/03312025_3ctk_celseq2_atac_batch1/DolphinNext_celseq2/trimmed_KRT/report11011/ESAT/")
+
+counts.56bp.list <- list()
+metadata.56bp.list <- list()
+
+for (i in 1:length(Dir.esat.list)) {
+  # fetch ESAT directory
+  Dir.esat=Dir.esat.list[i]
+    
+  # 1. import ESAT counts into master table
+  flst <- list.files(path = Dir.esat, pattern = "esat.txt.gene.txt")
+  counts <- create_table(Dir.esat, flst) %>% rownames_to_column("key") %>%
+    tidyr::separate("key",into=c("gene",NA,NA),sep=";",remove=TRUE) %>% column_to_rownames("gene")
+  col.sum = data.frame(sample = colnames(counts), samplesum = apply(counts,2,sum))
+  
+  # remove mitochondria genes
+  MTgenes=read.table("~/Downloads/nl/human/skin/eQTLs/literature/UCSC_tracks/Ensembl_GRCh38.105_mitochondrial_genes.txt")
+  counts <- counts %>% mutate(gene=rownames(.)) %>% 
+    dplyr::filter(!rownames(.) %in% MTgenes$V1) %>% dplyr::select(-"gene")
+  print(Dir.esat)
+  print(dim(counts))
+  
+  # mapping summary
+  info_alignment <- data.table::fread(paste0(Dir.esat,"/../summary/overall_summary.tsv")) %>%
+    set_colnames(c("sample","total_reads","multimapped_reads_aligned","unique_reads_aligned")) %>%
+    left_join( . , col.sum, by="sample") %>%
+    dplyr::mutate(reads_aligned = multimapped_reads_aligned + unique_reads_aligned) %>%
+    dplyr::mutate(all_aligned_reads_over_total = (multimapped_reads_aligned + unique_reads_aligned) / total_reads) %>%
+    dplyr::mutate(unique_aligned_reads_over_total = unique_reads_aligned / total_reads)
+  
+  # metadata
+  metadata <- data.frame(sample = colnames(counts), tosplit = colnames(counts)) %>%
+    tidyr::separate(., col=tosplit, into=c(NA,"CS2","donor","celltype","condition",NA,NA),sep="_") %>%
+    dplyr::mutate(read_length="56bp") %>%
+    dplyr::mutate(phase="phase2") %>%
+    dplyr::mutate(technical_rep="S1") %>%
+    dplyr::mutate(sequencing_platform="NovaSeq") %>%
+    right_join( . , info_alignment)
+  metadata$condition <- ordered(metadata$condition, levels=c("PBS","IFNG","IFNB","TNF"))
+  metadata$celltype <- ordered(metadata$celltype, levels=c("FRB","KRT","MEL"))
+  
+  # populate large list
+  counts.56bp.list[[i]] <- counts
+  metadata.56bp.list[[i]] <- metadata
+  rm(counts, metadata, info_alignment, col.sum, flst)
+}
+# combine all data frames by column
+counts.56bp <- do.call(cbind, counts.56bp.list)
+metadata.56bp <- do.call(rbind, metadata.56bp.list)
+metadata.56bp <- metadata.56bp[,c("sample","read_length","donor","celltype","condition","CS2",
+                                      "phase","technical_rep","sequencing_platform",
+                                      "total_reads","multimapped_reads_aligned","unique_reads_aligned",
+                                      "samplesum","reads_aligned","all_aligned_reads_over_total","unique_aligned_reads_over_total")]
+
+rm(counts.56bp.list, metadata.56bp.list)
+```
+
+### combine count matrices and correct for mislabeled samples
+```{r combine-counts-matrix}
+tmp.counts <- cbind(counts.phase1, counts.56bp)
+tmp.metadata <- rbind(metadata.phase1, metadata.56bp)
+tmp.metadata <- tmp.metadata[match(colnames(tmp.counts), tmp.metadata$sample), ]
+rm(counts.phase1, counts.56bp)
+rm(metadata.phase1,metadata.56bp)
+rm(MTgenes, Dir.esat.list, i)
+
+# F72, F75, F76, F78, F80, F81's fibroblast RNA samples were mistakenly labeled as "keratinocyte" and placed in KRT's box. now we have duplicated FRB libraries for those 6 donors in all four conditions. Based on the aligned reads, I pick and choose which one of the duplicates to keep for the FRB samples, and discard the other copy.
+to_keep <- tmp.metadata %>% 
+  mutate(biosample = paste0(donor,"_",celltype,"_",condition)) %>%
+  dplyr::filter(biosample %in% c("F72_FRB_PBS", "F72_FRB_IFNG", "F72_FRB_IFNB", "F72_FRB_TNF",
+  "F75_FRB_PBS", "F75_FRB_IFNG", "F75_FRB_IFNB", "F75_FRB_TNF",
+  "F76_KRT_PBS", "F76_KRT_IFNG", "F76_KRT_IFNB", "F76_FRB_TNF",
+  "F78_KRT_PBS", "F78_KRT_IFNG", "F78_KRT_IFNB", "F78_FRB_TNF",
+  "F80_KRT_PBS", "F80_KRT_IFNG", "F80_FRB_IFNB", "F80_FRB_TNF",
+  "F81_KRT_PBS", "F81_FRB_IFNG", "F81_KRT_IFNB", "F81_KRT_TNF")) %>%
+  pull(sample)
+
+to_delete <- tmp.metadata %>% 
+  mutate(biosample = paste0(donor,"_",celltype,"_",condition)) %>%
+  dplyr::filter(biosample %in% c("F72_FRB_PBS", "F72_FRB_IFNG", "F72_FRB_IFNB", "F72_FRB_TNF",
+  "F75_FRB_PBS", "F75_FRB_IFNG", "F75_FRB_IFNB", "F75_FRB_TNF",
+  "F76_FRB_PBS", "F76_FRB_IFNG", "F76_FRB_IFNB", "F76_FRB_TNF",
+  "F78_FRB_PBS", "F78_FRB_IFNG", "F78_FRB_IFNB", "F78_FRB_TNF",
+  "F80_FRB_PBS", "F80_FRB_IFNG", "F80_FRB_IFNB", "F80_FRB_TNF",
+  "F81_FRB_PBS", "F81_FRB_IFNG", "F81_FRB_IFNB", "F81_FRB_TNF",
+  "F72_KRT_PBS", "F72_KRT_IFNG", "F72_KRT_IFNB", "F72_KRT_TNF",
+  "F75_KRT_PBS", "F75_KRT_IFNG", "F75_KRT_IFNB", "F75_KRT_TNF",
+  "F76_KRT_PBS", "F76_KRT_IFNG", "F76_KRT_IFNB", "F76_KRT_TNF",
+  "F78_KRT_PBS", "F78_KRT_IFNG", "F78_KRT_IFNB", "F78_KRT_TNF",
+  "F80_KRT_PBS", "F80_KRT_IFNG", "F80_KRT_IFNB", "F80_KRT_TNF",
+  "F81_KRT_PBS", "F81_KRT_IFNG", "F81_KRT_IFNB", "F81_KRT_TNF")) %>%
+  pull(sample)
+
+counts.keep = tmp.counts[,to_keep]
+metadata.keep = tmp.metadata[match(colnames(counts.keep), tmp.metadata$sample), ]
+metadata.keep$sample = gsub("KRT", "FRB", metadata.keep$sample)
+metadata.keep$celltype = gsub("KRT", "FRB", metadata.keep$celltype)
+colnames(counts.keep) = gsub("KRT", "FRB", colnames(counts.keep))
+
+counts.cleaned = tmp.counts %>% dplyr::select(-to_delete)
+metadata.cleaned = tmp.metadata[match(colnames(counts.cleaned), tmp.metadata$sample), ]
+
+metadata = rbind(metadata.cleaned, metadata.keep)
+metadata <- metadata %>%
+  mutate(donor_num = as.numeric(sub("F", "", metadata$donor))) %>%
+  arrange(condition, celltype, donor_num) %>%
+  mutate(biosample=paste0(donor,"_",celltype,"_",condition))
+counts = cbind(counts.cleaned, counts.keep)
+counts = counts[, metadata$sample]
+rm(to_keep, to_delete, tmp.counts, tmp.metadata, counts.keep, metadata.keep, counts.cleaned, metadata.cleaned)
+```
+### calculate CPM
+```{r CPM}
+## Calculate CPM
+col.sum=apply(counts,2,sum)
+CPM=sweep(counts, 2, col.sum, `/`)*1000000
+log2CPM=log2(CPM+1)
+rm(col.sum)
+```
+
+### filter for expressed genes. An expressed gene shall have CPM >= 10 in at least 5 donors in a condition.
+```{r filter}
+conditions <- c("PBS", "IFNG", "IFNB", "TNF")
+celltypes <-c("FRB","MEL","KRT")
+expressed_genes_list <- list()
+
+for (ct in celltypes) {
+  gene_expression_status <- logical(nrow(CPM))
+  
+  # Get sample names for this cell type
+  ct_samples <- colnames(CPM)[grepl(paste0("_", ct, "_"), colnames(CPM))]
+  
+  for (i in 1:nrow(CPM)) {
+    is_expressed <- FALSE
+    for (cond in conditions) {
+      cond_samples <- ct_samples[grepl(paste0("_", cond), ct_samples)]
+      # Extract CPM values for this gene under this cell type and condition
+      cpm_values <- CPM[i, cond_samples]
+      if (length(which(cpm_values>=10)) >= 5) {
+        is_expressed <- TRUE
+        break
+      }
+    }
+    
+    gene_expression_status[i] <- is_expressed
+  }
+  
+  expressed_genes_list[[ct]] <- rownames(CPM)[gene_expression_status]
+}
+
+# Filter for expressed genes
+expressed_genes <- unique(unlist(expressed_genes_list))
+expressed_genes.mel <- unique(expressed_genes_list[["MEL"]])
+rm(celltypes, cond, cond_samples, conditions, ct, ct_samples, gene_expression_status, is_expressed, donor_ids, exprs_donors)
+```
+## PCA
+```{r pca}
+# Calculate Coefficient of Variation (COV)
+gene_means <- rowMeans(log2CPM.expressed)
+gene_sds <- apply(log2CPM.expressed, 1, sd)
+gene_cov <- gene_sds / gene_means
+
+# Remove genes with mean = 0 to avoid NaNs
+gene_cov[is.na(gene_cov)] <- 0
+
+# Select top N variable genes
+top_n <- 3000
+top_genes <- names(sort(gene_cov, decreasing = TRUE))[1:top_n]
+
+# Subset log2CPM
+log2CPM_subset <- log2CPM[top_genes, ]
+
+#calculate principal components for top 3000 COV genes' log2CPM
+pca_obj <- prcomp(t(log2CPM_subset), scale. = TRUE)
+
+pca_scores <- as.data.frame(pca_obj$x)  # this is samples × PCs
+pca_scores$sample_id <- colnames(counts)     # optional
+pca_scores$celltype <- metadata$celltype
+pca_scores$condition <- metadata$condition
+pca_scores$donor <- metadata$donor
+pca_scores$read_length <- metadata$read_length
+pca_scores$sequencing_platform <- metadata$sequencing_platform
+pca_scores$unique_aligned_reads_over_total <- metadata$unique_aligned_reads_over_total
+# Get variance explained
+percent_var <- round(100 * (pca_obj$sdev^2 / sum(pca_obj$sdev^2)), 1)
+# Now use:
+xlab <- paste0("PC1 (", percent_var[1], "%)")
+ylab <- paste0("PC2 (", percent_var[2], "%)")
+
+p1 = ggplot(data=pca_scores, aes(
+  x = PC1,
+  y = PC2,
+  color = condition,
+  #shape = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes",
+       color = "celltype", shape = "condition",
+       x = xlab, y = ylab) 
+
+# Then enable the hover text in plotly
+p1_interactive <- ggplotly(p1, tooltip = "text")
+p1_interactive
+
+
+# Extract top PC1 and PC2 gene loadings
+top_pc1_genes <- names(sort(pca_obj$rotation[, 1], decreasing = TRUE)[1:30])
+top_pc2_genes <- names(sort(pca_obj$rotation[, 2], decreasing = TRUE)[1:30])
+
+# Combine and deduplicate
+top_genes <- unique(c(top_pc1_genes, top_pc2_genes))
+
+# Plot mean expression
+mean_CPM <- rowMeans(CPM[top_genes, ])
+barplot(mean_CPM, las=2, main="Mean CPM of top PC1/PC2 genes", col="steelblue")
+
+
+# Use directional projection of gene loadings onto the cell-type separation vector
+# Estimate centroids of each cell type in PC1–PC2 space:
+frb_center <- colMeans(pca_scores[pca_scores$celltype == "FRB", c("PC1", "PC2")])
+krt_center <- colMeans(pca_scores[pca_scores$celltype == "KRT", c("PC1", "PC2")])
+mel_center <- colMeans(pca_scores[pca_scores$celltype == "MEL", c("PC1", "PC2")])
+
+# Define the separation vector:
+# Vector from FRB to KRT
+vec_frb_to_krt <- krt_center - frb_center
+unit_frb_to_krt <- vec_frb_to_krt / sqrt(sum(vec_frb_to_krt^2))
+
+# Vector from FRB to MEL
+vec_frb_to_mel <- mel_center - frb_center
+unit_frb_to_mel <- vec_frb_to_mel / sqrt(sum(vec_frb_to_mel^2))
+
+# Vector from KRT to MEL
+vec_krt_to_mel <- mel_center - krt_center
+unit_krt_to_mel <- vec_krt_to_mel / sqrt(sum(vec_krt_to_mel^2))
+
+# Project each gene's PC1–PC2 loading onto the separation vector:
+# Get gene loading matrix for PC1 and PC2
+gene_loadings <- pca_obj$rotation[, 1:2]
+
+# Get top directional genes:
+# top_mel_genes_from_krt: genes that push samples from KRT → MEL
+proj_frb_to_krt <- gene_loadings %*% unit_frb_to_krt
+proj_frb_to_mel <- gene_loadings %*% unit_frb_to_mel
+proj_krt_to_mel <- gene_loadings %*% unit_krt_to_mel
+
+top_frb_genes_from_krt <- names(sort(proj_frb_to_krt[,1], decreasing = TRUE)[1:20])
+top_krt_genes_from_frb <- names(sort(proj_frb_to_krt[,1], decreasing = FALSE)[1:20])
+
+top_mel_genes_from_frb <- names(sort(proj_frb_to_mel[,1], decreasing = TRUE)[1:20])
+top_frb_genes_from_mel <- names(sort(proj_frb_to_mel[,1], decreasing = FALSE)[1:20])
+
+top_mel_genes_from_krt <- names(sort(proj_krt_to_mel[,1], decreasing = TRUE)[1:20])
+top_krt_genes_from_mel <- names(sort(proj_krt_to_mel[,1], decreasing = FALSE)[1:20])
+
+
+#### PC2 vs PC3 ####
+xlab <- paste0("PC2 (", percent_var[2], "%)")
+ylab <- paste0("PC3 (", percent_var[3], "%)")
+
+p2 = ggplot(data=pca_scores, aes(
+  x = PC2,
+  y = PC3,
+  color = sequencing_platform,
+  shape = celltype,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes",
+       color = "sequencing_platform", shape = "celltype",
+       x = xlab, y = ylab) 
+p2_interactive <- ggplotly(p2, tooltip = "text")
+p2_interactive
+
+#### PC3 vs PC4 ####
+xlab <- paste0("PC3 (", percent_var[3], "%)")
+ylab <- paste0("PC4 (", percent_var[4], "%)")
+
+p3 = ggplot(data=pca_scores, aes(
+  x = PC3,
+  y = PC4,
+  color = condition,
+  shape = celltype,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes",
+       color = "condition", shape = "celltype",
+       x = xlab, y = ylab) 
+p3_interactive <- ggplotly(p3, tooltip = "text")
+p3_interactive
+
+# which PC captures condition effect? bar plot 
+ggplot(pca_scores, aes(x = condition, y = PC4, fill = condition)) +
+  geom_boxplot() +
+  labs(title = "PC4 captures condition effect", y = paste0("PC4 (", percent_var[4], "%)"))
+
+# Run ANOVA across PCs to see which PC corresponds to "CONDITION"
+pca_scores$condition <- metadata$condition
+
+# Loop through top 10 PCs
+for (i in 1:10) {
+  cat(paste0("PC", i, ": "))
+  print(summary(aov(pca_scores[,i] ~ pca_scores$condition)))
+}
+```
+```{r pca_MEL}
+# Calculate Coefficient of Variation (COV)
+this_log2CPM <- log2CPM.expressed[, metadata$celltype == "MEL"]
+this_metadata <- metadata[metadata$celltype == "MEL",]
+gene_means <- rowMeans(this_log2CPM)
+gene_sds <- apply(this_log2CPM, 1, sd)
+gene_cov <- gene_sds / gene_means
+
+# Remove genes with mean = 0 to avoid NaNs
+gene_cov[is.na(gene_cov)] <- 0
+
+# Select top N variable genes
+top_n <- 3000
+top_genes <- names(sort(gene_cov, decreasing = TRUE))[1:top_n]
+
+# Subset log2CPM
+log2CPM_subset <- this_log2CPM[top_genes, ]
+
+#calculate principal components for top 3000 COV genes' log2CPM
+pca_obj <- prcomp(t(log2CPM_subset), scale. = TRUE)
+
+pca_scores <- as.data.frame(pca_obj$x)  # this is samples × PCs
+pca_scores$sample_id <- colnames(this_log2CPM)     # optional
+pca_scores$celltype <- this_metadata$celltype
+pca_scores$condition <- this_metadata$condition
+pca_scores$donor <- this_metadata$donor
+pca_scores$read_length <- this_metadata$read_length
+pca_scores$sequencing_platform <- this_metadata$sequencing_platform
+pca_scores$unique_aligned_reads_over_total <- this_metadata$unique_aligned_reads_over_total
+pca_scores$total_reads <- this_metadata$total_reads
+# Get variance explained
+percent_var <- round(100 * (pca_obj$sdev^2 / sum(pca_obj$sdev^2)), 1)
+# Now use:
+xlab <- paste0("PC1 (", percent_var[1], "%)")
+ylab <- paste0("PC2 (", percent_var[2], "%)")
+
+p1 = ggplot(data=pca_scores, aes(
+  x = PC1,
+  y = PC2,
+  color = condition,
+  #shape = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total,
+    "<br>Total reads:", total_reads
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 209 melanocytes samples\ntop 3000 COV expressed genes",
+       color = "condition", shape = "condition",
+       x = xlab, y = ylab) 
+
+# Then enable the hover text in plotly
+p1_interactive <- ggplotly(p1, tooltip = "text")
+p1_interactive
+
+
+# Extract top PC1 and PC2 gene loadings
+top_pc1_genes <- names(sort(pca_obj$rotation[, 1], decreasing = TRUE)[1:30])
+bottom_pc1_genes <- names(sort(pca_obj$rotation[, 1], decreasing = FALSE)[1:30])
+
+top_pc2_genes <- names(sort(pca_obj$rotation[, 2], decreasing = TRUE)[1:30])
+bottom_pc2_genes <- names(sort(pca_obj$rotation[, 2], decreasing = FALSE)[1:30])
+
+#### PC2 vs PC3 ####
+xlab <- paste0("PC2 (", percent_var[2], "%)")
+ylab <- paste0("PC3 (", percent_var[3], "%)")
+
+p2 = ggplot(data=pca_scores, aes(
+  x = PC2,
+  y = PC3,
+  color = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes",
+       color = "sequencing_platform", shape = "celltype",
+       x = xlab, y = ylab) 
+p2_interactive <- ggplotly(p2, tooltip = "text")
+p2_interactive
+
+#### PC3 vs PC4 ####
+xlab <- paste0("PC3 (", percent_var[3], "%)")
+ylab <- paste0("PC4 (", percent_var[4], "%)")
+
+p3 = ggplot(data=pca_scores, aes(
+  x = PC3,
+  y = PC4,
+  color = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes",
+       color = "condition", shape = "celltype",
+       x = xlab, y = ylab) 
+p3_interactive <- ggplotly(p3, tooltip = "text")
+p3_interactive
+
+# which PC captures condition effect? bar plot 
+ggplot(pca_scores, aes(x = condition, y = PC4, fill = condition)) +
+  geom_boxplot() +
+  labs(title = "PC4 captures condition effect", y = paste0("PC3 (", percent_var[3], "%)"))
+
+# Run ANOVA across PCs to see which PC corresponds to "CONDITION"
+pca_scores$condition <- metadata$condition
+
+# Loop through top 10 PCs
+for (i in 1:10) {
+  cat(paste0("PC", i, ": "))
+  print(summary(aov(pca_scores[,i] ~ pca_scores$condition)))
+}
+```
+```{r pca-krt-and-frb}
+this_samples = colnames(counts)[grepl("FRB|KRT", colnames(counts))]
+this_counts = counts[, this_samples]
+this_metadata = metadata[match(colnames(this_counts), metadata$sample), ]
+
+#calculate principal components for the raw count matrix
+pca_obj <- prcomp(t(this_counts))
+
+pca_scores <- as.data.frame(pca_obj$x)  # this is samples × PCs
+pca_scores$sample_id <- colnames(this_counts)     # optional
+pca_scores$celltype <- this_metadata$celltype
+pca_scores$condition <- this_metadata$condition
+pca_scores$donor <- this_metadata$donor
+pca_scores$read_length <- this_metadata$read_length
+pca_scores$sequencing_platform <- this_metadata$sequencing_platform
+pca_scores$unique_aligned_reads_over_total <- this_metadata$unique_aligned_reads_over_total
+
+ggplot(pca_scores, aes(x = PC1, y = PC2, color = celltype, shape = condition)) +
+  geom_point(size = 3) +
+  labs(title = "PCA of Samples (566 KRT + FRB)", color = "Cell Type", shape = "Condition") +
+  theme_minimal() + 
+  stat_ellipse(aes(group = celltype), type = "norm", linetype = 2)
+
+
+p1 = ggplot(data=pca_scores, aes(
+  x = PC1,
+  y = PC2,
+  color = celltype,
+  shape = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for 566 KRT and FRB samples",
+       color = "celltype", shape = "condition") +
+  stat_ellipse(aes(group = celltype), type = "norm", linetype = 2)
+
+# Then enable the hover text in plotly
+p1_interactive <- ggplotly(p1, tooltip = "text")
+p1_interactive
+
+#Use Combined Gene Contribution via Vector Magnitude
+# Gene contributions to both PC1 and PC2
+loadings <- pca_obj$rotation[, 1:2]  # genes × (PC1, PC2)
+# Euclidean length (magnitude) of each gene's loading vector
+loading_magnitude <- sqrt(loadings[,1]^2 + loadings[,2]^2)
+# Use directional projection of gene loadings onto the cell-type separation vector
+# Estimate centroids of each cell type in PC1–PC2 space:
+frb_center <- colMeans(pca_scores[pca_scores$celltype == "FRB", c("PC1", "PC2")])
+krt_center <- colMeans(pca_scores[pca_scores$celltype == "KRT", c("PC1", "PC2")])
+# Define the separation vector:
+separation_vector <- krt_center - frb_center  # Points from FRB → KRT
+# Project each gene's PC1–PC2 loading onto the separation vector:
+# Get gene loading matrix for PC1 and PC2
+gene_loadings <- pca_obj$rotation[, 1:2]  # genes × (PC1, PC2)
+# Normalize the separation vector
+sep_unit <- separation_vector / sqrt(sum(separation_vector^2))
+# Project gene loadings onto the separation direction
+gene_projection_scores <- gene_loadings %*% sep_unit  # matrix multiplication
+# Positive scores = genes that push samples toward KRT,
+# Negative scores = genes that push samples toward FRB
+top_krt_genes <- names(sort(gene_projection_scores[,1], decreasing = TRUE)[1:20])
+top_frb_genes <- names(sort(gene_projection_scores[,1], decreasing = FALSE)[1:20])
+
+# why are there KRT samples in the FRB cluster? (PC2 > 0)
+temp = pca_scores[which(grepl("KRT",rownames(pca_scores))),] %>% 
+  as.data.frame %>%
+  dplyr::filter(PC2 > 0) %>%
+  mutate(biosample=paste0(donor,"_",celltype,"_",condition)) %>%
+  arrange(biosample)
+temp$biosample
+# F72, F75, F76, F78, F80, F81 all 4 conditions were in this list. 6donors x 4 conditions = 24 samples total. 
+# I recall that during library prep, I noticed that some samples in the extracted RNA box of "KRT" were labeled as "FRB". and I had a concern that I mislabeled things. I even wrote a script "KRT_combination_with_FRB_investigation.R" in the RNA-Seq/keeratinocytes folder.
+# I should check the freezer if that truly is the case. yes. totally. those frozen RNA samples are now labeled "KRT" because I relabeled them. They are physically next and in sequence to each other, 24 of them (which makes sense because I processed 24 samples at a time, so I must have mislabeled the whole batch). so I should discard these samples and also remove the rows from FS plates.
+
+tmp = data.frame(F37_FRB_PBS=CPM[top_frb_genes,colnames(CPM)[grepl("F37_FRB_PBS", colnames(CPM))]], 
+                 F75_FRB_PBS=CPM[top_frb_genes,colnames(CPM)[grepl("F75_FRB_PBS", colnames(CPM))]],
+                 gene=top_frb_genes)
+
+ggplot(tmp, aes(x=F37_FRB_PBS, y=F75_FRB_PBS, label = gene)) +
+  geom_point() +
+  geom_text(vjust = -0.5, hjust = 1, size = 3) + 
+  labs(title="top FRB genes") +
+  xlim(0, max(c(tmp$F37_FRB_PBS, tmp$F37_FRB_PBS))) +
+  ylim(0, max(c(tmp$F75_KRT_PBS, tmp$F75_FRB_PBS)))
+```
+## DEseq2
+```{r deseq2-mel}
+this_counts <- counts[, metadata$celltype == "MEL"]
+this_metadata <- metadata[metadata$celltype == "MEL",]
+this_metadata$condition <- as.character(this_metadata$condition)
+
+# Construct DESeqDataSet with all genes
+dds <- DESeqDataSetFromMatrix(countData = this_counts, colData = this_metadata,
+                              design = ~ donor + condition)
+dds$condition <- relevel(factor(dds$condition), ref = "PBS")
+
+# Run DESeq
+dds.mel <- DESeq(dds)
+
+# DESeq2 results for MEL comparisons
+res.mel.ifng <- results(dds, contrast = c("condition", "IFNG", "PBS"))
+res.mel.ifnb <- results(dds, contrast = c("condition", "IFNB", "PBS"))
+res.mel.tnf  <- results(dds, contrast = c("condition", "TNF",  "PBS"))
+
+# Filter significant DEGs (adj p < 0.05 and |log2FC| ≥ 1)
+deg.mel.ifng <- as.data.frame(res.mel.ifng)[which(res.mel.ifng$padj < 0.05 & abs(res.mel.ifng$log2FoldChange) >= 1), ] %>% rownames_to_column("gene")  %>% na.omit() %>% arrange(padj)
+deg.mel.ifnb <- as.data.frame(res.mel.ifnb)[which(res.mel.ifnb$padj < 0.05 & abs(res.mel.ifnb$log2FoldChange) >= 1), ] %>% rownames_to_column("gene")  %>% na.omit() %>% arrange(padj)
+deg.mel.tnf  <- as.data.frame(res.mel.tnf)[which(res.mel.tnf$padj < 0.05 & abs(res.mel.tnf$log2FoldChange) >= 1), ] %>% rownames_to_column("gene")  %>% na.omit() %>% arrange(padj)
+
+# MA plot
+plotMA(res.mel.ifng, main = "IFNG vs PBS (MEL)", ylim = c(-5, 5))
+
+# Volcano plot
+res.mel.ifng.df <- as.data.frame(res.mel.ifng)
+res.mel.ifng.df$significant <- with(res.mel.ifng.df, padj < 0.05 & abs(log2FoldChange) >= 1)
+
+ggplot(res.mel.ifng.df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(values = c("grey", "red")) +
+  theme_minimal() +
+  labs(title = "IFNG vs PBS (MEL)", x = "log2FC", y = "-log10(adj. p)")
+
+
+```
+```{r deseq2-krt}
+this_counts <- counts[, metadata$celltype == "KRT"]
+this_metadata <- metadata[metadata$celltype == "KRT",]
+this_metadata$condition <- as.character(this_metadata$condition)
+colnames(this_counts)==this_metadata$sample
+
+# Construct DESeqDataSet with all genes
+dds <- DESeqDataSetFromMatrix(countData = this_counts, colData = this_metadata,
+                              design = ~ donor + condition)
+dds$condition <- relevel(factor(dds$condition), ref = "PBS")
+
+# Run DESeq
+dds.krt <- DESeq(dds)
+
+# DESeq2 results for MEL comparisons
+res.krt.ifng <- results(dds.krt, contrast = c("condition", "IFNG", "PBS"))
+res.krt.ifnb <- results(dds.krt, contrast = c("condition", "IFNB", "PBS"))
+res.krt.tnf  <- results(dds.krt, contrast = c("condition", "TNF",  "PBS"))
+
+# Filter significant DEGs (adj p < 0.05 and |log2FC| ≥ 1)
+deg.krt.ifng <- as.data.frame(res.krt.ifng)[which(res.krt.ifng$padj < 0.05 & abs(res.krt.ifng$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.krt.ifnb <- as.data.frame(res.krt.ifnb)[which(res.krt.ifnb$padj < 0.05 & abs(res.krt.ifnb$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.krt.tnf  <- as.data.frame(res.krt.tnf)[which(res.krt.tnf$padj < 0.05 & abs(res.krt.tnf$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+```
+```{r deseq2-frb}
+## ----------------- FRB
+this_counts <- counts[, metadata$celltype == "FRB"]
+this_metadata <- metadata[metadata$celltype == "FRB",]
+this_metadata$condition <- as.character(this_metadata$condition)
+colnames(this_counts)==this_metadata$sample
+
+# Construct DESeqDataSet with all genes
+dds <- DESeqDataSetFromMatrix(countData = this_counts, colData = this_metadata,
+                              design = ~ donor + condition)
+dds$condition <- relevel(factor(dds$condition), ref = "PBS")
+
+# Run DESeq
+dds.frb <- DESeq(dds)
+
+# DESeq2 results for MEL comparisons
+res.frb.ifng <- results(dds.frb, contrast = c("condition", "IFNG", "PBS"))
+res.frb.ifnb <- results(dds.frb, contrast = c("condition", "IFNB", "PBS"))
+res.frb.tnf  <- results(dds.frb, contrast = c("condition", "TNF",  "PBS"))
+
+# Filter significant DEGs (adj p < 0.05 and |log2FC| ≥ 1)
+deg.frb.ifng <- as.data.frame(res.frb.ifng)[which(res.frb.ifng$padj < 0.05 & abs(res.frb.ifng$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.frb.ifnb <- as.data.frame(res.frb.ifnb)[which(res.frb.ifnb$padj < 0.05 & abs(res.frb.ifnb$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.frb.tnf  <- as.data.frame(res.frb.tnf)[which(res.frb.tnf$padj < 0.05 & abs(res.frb.tnf$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+
+save.image(file=paste0(Dir,'/myEnvironment_main.RData'))
+```
+```{r deseq2-all}
+## ----------------- all cell types
+this_counts <- counts
+this_metadata <- metadata
+this_metadata$condition <- as.character(this_metadata$condition)
+this_metadata$celltype <- as.character(this_metadata$celltype)
+colnames(this_counts)==this_metadata$sample
+
+# Construct DESeqDataSet with all genes
+dds <- DESeqDataSetFromMatrix(countData = this_counts, colData = this_metadata,
+                              design = ~ donor + celltype + condition + celltype:condition)
+dds$condition <- relevel(factor(dds$condition), ref = "PBS")
+
+# Run DESeq
+dds.3ct <- DESeq(dds)
+
+# DESeq2 results for MEL comparisons
+res.3ct.ifng <- results(dds.3ct, contrast = c("condition", "IFNG", "PBS"))
+res.3ct.ifnb <- results(dds.3ct, contrast = c("condition", "IFNB", "PBS"))
+res.3ct.tnf  <- results(dds.3ct, contrast = c("condition", "TNF",  "PBS"))
+
+# Filter significant DEGs (adj p < 0.05 and |log2FC| ≥ 1)
+deg.3ct.ifng <- as.data.frame(res.3ct.ifng)[which(res.3ct.ifng$padj < 0.05 & abs(res.3ct.ifng$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.3ct.ifnb <- as.data.frame(res.3ct.ifnb)[which(res.3ct.ifnb$padj < 0.05 & abs(res.3ct.ifnb$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.3ct.tnf  <- as.data.frame(res.3ct.tnf)[which(res.3ct.tnf$padj < 0.05 & abs(res.3ct.tnf$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+
+vsd.3ct <- vst(dds.3ct, blind = FALSE) # this gives me globally transformed expression matrix
+counts_norm <- counts(dds, normalized=TRUE)  # DESeq2-normalized counts (not library size scaled)
+cpm_mat <- t(t(counts_norm) / colSums(counts_norm)) * 1e6
+
+rm(this_counts, this_metadata, dds)
+save.image(file=paste0(Dir,'/myEnvironment_main.RData'))
+```
+## Obtain VST from DESeq2 objects
+```{r vst}
+clean_gene_map <- metagene_dict %>% 
+  select(metagene = meta, gene = name)
+
+vst.mel <- assay(vst(dds.mel, blind = TRUE)) %>% 
+  as.data.frame %>% 
+  rownames_to_column("metagene") %>%
+  dplyr::left_join(clean_gene_map, by = "metagene") %>%
+  dplyr::mutate(gene = dplyr::coalesce(gene, metagene)) %>%
+  dplyr::select(-metagene) %>%
+  dplyr::filter(.$gene!="ARMCX5-GPRASP2") %>%
+  column_to_rownames("gene") %>%
+  rownames_to_column("gene")
+
+vst.krt <- assay(vst(dds.krt, blind = TRUE)) %>% 
+  as.data.frame %>% 
+  rownames_to_column("metagene") %>%
+  dplyr::left_join(clean_gene_map, by = "metagene") %>%
+  dplyr::mutate(gene = dplyr::coalesce(gene, metagene)) %>%
+  dplyr::select(-metagene) %>%
+  dplyr::filter(.$gene!="ARMCX5-GPRASP2") %>%
+  column_to_rownames("gene") %>%
+  rownames_to_column("gene")
+
+vst.frb <- assay(vst(dds.frb, blind = TRUE)) %>% 
+  as.data.frame %>% 
+  rownames_to_column("metagene") %>%
+  dplyr::left_join(clean_gene_map, by = "metagene") %>%
+  dplyr::mutate(gene = dplyr::coalesce(gene, metagene)) %>%
+  dplyr::select(-metagene) %>%
+  dplyr::filter(.$gene!="ARMCX5-GPRASP2") %>%
+  column_to_rownames("gene") %>%
+  rownames_to_column("gene")
+
+data.table::fwrite(vst.mel, file="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/analysis_07142025/VST_MEL.txt",sep="\t",quote=F)
+data.table::fwrite(vst.krt, file="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/analysis_07142025/VST_KRT.txt",sep="\t",quote=F)
+data.table::fwrite(vst.frb, file="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/analysis_07142025/VST_FRB.txt",sep="\t",quote=F)
+```
+## Heatmap
+### heatmap of raw log2(CPM+1)
+```{r heatmap-log2(CPM+1)}
+vars_deg <- ls(pattern = "^deg.")
+gene_lists <- lapply(vars_deg, function(var) {
+  get(var)$gene
+})
+expressed_DEG <- intersect(unique(unlist(expressed_genes_list)), 
+                               unique(unlist(gene_lists)))
+
+CPM_DEG <- CPM[expressed_DEG,]
+log2CPM_DEG <- log2(CPM_DEG + 1)
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(log2CPM_DEG, 14)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+                        rep(6,km_res$breaks[6]-km_res$breaks[5]),
+                        rep(7,km_res$breaks[7]-km_res$breaks[6]),
+                        rep(8,km_res$breaks[8]-km_res$breaks[7]),
+                        rep(9,km_res$breaks[9]-km_res$breaks[8]),
+                        rep(10,km_res$breaks[10]-km_res$breaks[9]),
+                        rep(11,km_res$breaks[11]-km_res$breaks[10]),
+                        rep(12,km_res$breaks[12]-km_res$breaks[11]),
+                        rep(13,km_res$breaks[13]-km_res$breaks[12]),
+                        rep(14,nrow(km_res$clustered)-km_res$breaks[13]))
+km_res.rna <- km_res
+split_instructions.rna <- split_instructions
+rm(km_res, split_instructions)
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap <- km_res.rna$clustered[,1:ncol(CPM_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+
+# 5. plot heatmap
+colnames(zlogCPM.heatmap)==metadata$sample
+
+column_ha = HeatmapAnnotation(
+  condition = metadata$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = metadata$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "#999999", "IFNG" = "#D7263D", "IFNB" = "#1E88E5", "TNF" = "#FFC107"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+pdf(paste0(Dir,"/heatmap_RNAseq_3ctk_allDEG_14kmm-hc_07172025_padj0.05_abslog2FC1_avgCPM10.pdf"),width=24,height=30)
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap, 
+                            name = "z-score log2CPM",
+                            top_annotation = column_ha,
+                            right_annotation = row_ha,
+                            column_title = "DE genes in 3 celltypes, IFNg/IFNb/TNF stimulated, , known IFNg inducible genes labeled",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(metadata$biosample[grepl("FRB_PBS",metadata$biosample)])), 
+                                             rep(2,length(metadata$biosample[grepl("KRT_PBS",metadata$biosample)])), 
+                                             rep(3,length(metadata$biosample[grepl("MEL_PBS",metadata$biosample)])), 
+                                             rep(4,length(metadata$biosample[grepl("FRB_IFNG",metadata$biosample)])), 
+                                             rep(5,length(metadata$biosample[grepl("KRT_IFNG",metadata$biosample)])),
+                                             rep(6,length(metadata$biosample[grepl("MEL_IFNG",metadata$biosample)])),
+                                             rep(7,length(metadata$biosample[grepl("FRB_IFNB",metadata$biosample)])), 
+                                             rep(8,length(metadata$biosample[grepl("KRT_IFNB",metadata$biosample)])), 
+                                             rep(9,length(metadata$biosample[grepl("MEL_IFNB",metadata$biosample)])), 
+                                             rep(10,length(metadata$biosample[grepl("FRB_TNF",metadata$biosample)])), 
+                                             rep(11,length(metadata$biosample[grepl("KRT_TNF",metadata$biosample)])),
+                                             rep(12,length(metadata$biosample[grepl("MEL_TNF",metadata$biosample)]))),
+                            row_split = split_instructions.rna, 
+                            show_row_names = FALSE,
+                            row_title_rot = 0,
+                            column_names_rot = 45,
+                            row_gap = unit(0, "mm"),
+                            border = TRUE,
+                            column_names_gp = gpar(fontsize = 10),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+cluster1_genes = rownames(km_res.rna$clustered)[which(split_instructions.rna==1)]
+
+for (i in 1:14){
+  this_cluster_genes = rownames(km_res.rna$clustered)[which(split_instructions.rna==i)]
+  write(this_cluster_genes, file=paste0(Dir,"/inducedGenes_log2FC1.5_cluster",as.character(i),".txt"))
+}
+
+```
+```{r heatmap-log2(CPM+1)-MEL}
+vars_deg <- ls(pattern = "^deg.mel")
+gene_lists <- lapply(vars_deg, function(var) {
+  get(var)$gene
+})
+expressed_DEG <- intersect(unique(unlist(expressed_genes_list)), 
+                               unique(unlist(gene_lists)))
+
+CPM_DEG <- CPM[expressed_DEG,grepl("MEL",colnames(CPM))]
+log2CPM_DEG <- log2(CPM_DEG + 1)
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(log2CPM_DEG, 5)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+km_res.rna <- km_res
+split_instructions.rna <- split_instructions
+rm(km_res, split_instructions)
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap <- km_res.rna$clustered[,1:ncol(CPM_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+
+# 5. plot heatmap
+metadata.heatmap <- metadata[metadata$sample%in%colnames(zlogCPM.heatmap), ]
+colnames(zlogCPM.heatmap)==metadata.heatmap$sample
+metadata.heatmap$biosample <- paste0(metadata.heatmap$donor,"_",metadata.heatmap$celltype,"_",metadata.heatmap$condition)
+
+column_ha = HeatmapAnnotation(
+  condition = metadata.heatmap$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = metadata.heatmap$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "#999999", "IFNG" = "#D7263D", "IFNB" = "#1E88E5", "TNF" = "#FFC107"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+pdf(paste0(Dir,"/heatmap_RNAseq_3ctk_MEL_MELDEG_5kmm-hc_07172025_padj0.05_abslog2FC1_avgCPM10.pdf"),width=24,height=30)
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap, 
+                            name = "z-score log2CPM",
+                            top_annotation = column_ha,
+                            right_annotation = row_ha,
+                            column_title = "DE genes in MEL, IFNg/IFNb/TNF stimulated, , known IFNg inducible genes labeled",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(metadata.heatmap$biosample[grepl("MEL_PBS",metadata.heatmap$biosample)])), 
+                                             rep(2,length(metadata.heatmap$biosample[grepl("MEL_IFNG",metadata.heatmap$biosample)])),
+                                             rep(3,length(metadata.heatmap$biosample[grepl("MEL_IFNB",metadata.heatmap$biosample)])), 
+                                             rep(4,length(metadata.heatmap$biosample[grepl("MEL_TNF",metadata.heatmap$biosample)]))),
+                            row_split = split_instructions.rna, 
+                            show_row_names = FALSE,
+                            row_title_rot = 0,
+                            column_names_rot = 45,
+                            row_gap = unit(0, "mm"),
+                            border = TRUE,
+                            column_names_gp = gpar(fontsize = 5),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+```
+```{r heatmap-log2(CPM+1)-FRB}
+vars_deg <- ls(pattern = "^deg.frb")
+gene_lists <- lapply(vars_deg, function(var) {
+  get(var)$gene
+})
+expressed_DEG <- intersect(unique(unlist(expressed_genes_list)), 
+                               unique(unlist(gene_lists)))
+
+CPM_DEG <- CPM[expressed_DEG,grepl("FRB",colnames(CPM))]
+log2CPM_DEG <- log2(CPM_DEG + 1)
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(log2CPM_DEG, 5)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+km_res.rna <- km_res
+split_instructions.rna <- split_instructions
+rm(km_res, split_instructions)
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap <- km_res.rna$clustered[,1:ncol(CPM_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+
+# 5. plot heatmap
+metadata.heatmap <- metadata[metadata$sample%in%colnames(zlogCPM.heatmap), ]
+colnames(zlogCPM.heatmap)==metadata.heatmap$sample
+metadata.heatmap$biosample <- paste0(metadata.heatmap$donor,"_",metadata.heatmap$celltype,"_",metadata.heatmap$condition)
+
+column_ha = HeatmapAnnotation(
+  condition = metadata.heatmap$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = metadata.heatmap$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "#999999", "IFNG" = "#D7263D", "IFNB" = "#1E88E5", "TNF" = "#FFC107"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+pdf(paste0(Dir,"/heatmap_RNAseq_3ctk_FRB_FRBDEG_5kmm-hc_07172025_padj0.05_abslog2FC1_avgCPM10.pdf"),width=24,height=30)
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap, 
+                            name = "z-score log2CPM",
+                            top_annotation = column_ha,
+                            right_annotation = row_ha,
+                            column_title = "DE genes in FRB, IFNg/IFNb/TNF stimulated, , known IFNg inducible genes labeled",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(metadata.heatmap$biosample[grepl("FRB_PBS",metadata.heatmap$biosample)])), 
+                                             rep(2,length(metadata.heatmap$biosample[grepl("FRB_IFNG",metadata.heatmap$biosample)])),
+                                             rep(3,length(metadata.heatmap$biosample[grepl("FRB_IFNB",metadata.heatmap$biosample)])), 
+                                             rep(4,length(metadata.heatmap$biosample[grepl("FRB_TNF",metadata.heatmap$biosample)]))),
+                            row_split = split_instructions.rna, 
+                            show_row_names = FALSE,
+                            row_title_rot = 0,
+                            column_names_rot = 45,
+                            row_gap = unit(0, "mm"),
+                            border = TRUE,
+                            column_names_gp = gpar(fontsize = 5),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+```
+### heatmap of ComBat-seq donor corrected log2(CPM+1)
+```{r combatseq}
+# perform the batch correction
+# transform the format of our groups and batches from names to numbers (e.g. 1, 2, etc.)
+groups = sapply(as.character(metadata$condition), switch, "PBS" = 1, "IFNG" = 2, "IFNB" = 3, "TNF" = 4, USE.NAMES = F)
+donor = as.numeric(as.factor(metadata$donor_num))
+
+# perform batch correction
+counts.corrected = ComBat_seq(counts = as.matrix(counts), batch = donor, group = groups)
+col.sum=apply(counts.corrected,2,sum)
+CPM.corrected=sweep(counts.corrected, 2, col.sum, `/`)*1000000
+log2CPM.corrected=log2(CPM.corrected+1)
+rm(groups, donor, col.sum)
+```
+```{r heatmap-corrected}
+vars_deg <- ls(pattern = "^deg.")
+gene_lists <- lapply(vars_deg, function(var) {
+  get(var)$gene
+})
+expressed_DEG <- intersect(unique(unlist(expressed_genes_list)), 
+                               unique(unlist(gene_lists)))
+
+
+CPM_DEG <- CPM.corrected[expressed_DEG,]
+log2CPM_DEG <- log2(CPM_DEG + 1)
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(log2CPM_DEG, 14)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+                        rep(6,km_res$breaks[6]-km_res$breaks[5]),
+                        rep(7,km_res$breaks[7]-km_res$breaks[6]),
+                        rep(8,km_res$breaks[8]-km_res$breaks[7]),
+                        rep(9,km_res$breaks[9]-km_res$breaks[8]),
+                        rep(10,km_res$breaks[10]-km_res$breaks[9]),
+                        rep(11,km_res$breaks[11]-km_res$breaks[10]),
+                        rep(12,km_res$breaks[12]-km_res$breaks[11]),
+                        rep(13,km_res$breaks[13]-km_res$breaks[12]),
+                        rep(14,nrow(km_res$clustered)-km_res$breaks[13]))
+km_res.rna <- km_res
+km_res.rna.corrected <- km_res
+split_instructions.rna <- split_instructions
+rm(km_res, split_instructions)
+
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap <- km_res.rna$clustered[,1:ncol(CPM_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+
+# 5. plot heatmap
+colnames(zlogCPM.heatmap)==metadata$sample
+
+column_ha = HeatmapAnnotation(
+  condition = metadata$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = metadata$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "#999999", "IFNG" = "#D7263D", "IFNB" = "#1E88E5", "TNF" = "#FFC107"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+pdf(paste0(Dir,"/heatmap_RNAseq_3ctk_allDEG_14kmm-hc_07182025_padj0.05_abslog2FC1_log2CPMcorrected.pdf"),width=24,height=30)
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap, 
+                            name = "z-score log2CPM corrected",
+                            top_annotation = column_ha,
+                            right_annotation = row_ha,
+                            column_title = "DE genes in 3 celltypes, IFNg/IFNb/TNF stimulated, , known IFNg inducible genes labeled",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(metadata$biosample[grepl("FRB_PBS",metadata$biosample)])), 
+                                             rep(2,length(metadata$biosample[grepl("KRT_PBS",metadata$biosample)])), 
+                                             rep(3,length(metadata$biosample[grepl("MEL_PBS",metadata$biosample)])), 
+                                             rep(4,length(metadata$biosample[grepl("FRB_IFNG",metadata$biosample)])), 
+                                             rep(5,length(metadata$biosample[grepl("KRT_IFNG",metadata$biosample)])),
+                                             rep(6,length(metadata$biosample[grepl("MEL_IFNG",metadata$biosample)])),
+                                             rep(7,length(metadata$biosample[grepl("FRB_IFNB",metadata$biosample)])), 
+                                             rep(8,length(metadata$biosample[grepl("KRT_IFNB",metadata$biosample)])), 
+                                             rep(9,length(metadata$biosample[grepl("MEL_IFNB",metadata$biosample)])), 
+                                             rep(10,length(metadata$biosample[grepl("FRB_TNF",metadata$biosample)])), 
+                                             rep(11,length(metadata$biosample[grepl("KRT_TNF",metadata$biosample)])),
+                                             rep(12,length(metadata$biosample[grepl("MEL_TNF",metadata$biosample)]))),
+                            row_split = split_instructions.rna, 
+                            show_row_names = FALSE,
+                            row_title_rot = 0,
+                            column_names_rot = 45,
+                            row_gap = unit(0, "mm"),
+                            border = TRUE,
+                            column_names_gp = gpar(fontsize = 10),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+```
+### heatmap of DEseq2 variance-stabilized transformed data
+## decide which samples to exclude
+```{r exclude-sample-KRT}
+### ---- use heatmap to decide outlier samples --- ####
+outliers_list <- c("F26_KRT_PBS","F39_KRT_PBS","F42_KRT_PBS","F43_KRT_PBS","F60_KRT_PBS","F116_KRT_PBS","F120_KRT_PBS",
+                   "F26_KRT_IFNG","F39_KFT_IFNG","F42_KFT_IFNG","F43_KRT_IFNG","F60_KRT_IFNG","F112_KRT_IFNG",
+                   "F103_KRT_IFNB","F118_KRT_TNF")
+pattern <- str_c(outliers_list, collapse = "|")
+outlier_samples_metadata.krt <- metadata %>% dplyr::filter(str_detect(sample, pattern))
+```
+```{r exclude-sample-MEL}
+### ---- use heatmap to decide outlier samples --- ####
+outliers_list <- c("F108_MEL","F109_MEL","F110_MEL","F111_MEL","F51_MEL","F52_MEL","F61_MEL","F118_MEL","F133_MEL","F116_MEL_IFNG","F116_MEL_IFNG","F142_MEL_TNF","F42_MEL_PBS","F34_MEL_PBS","F30_MEL_IFNG")
+lowcounts_list <- c("F116_MEL_IFNG","F142_MEL_TNF","F42_MEL_PBS","F34_MEL_PBS","F30_MEL_IFNG")
+pattern <- str_c(outliers_list, collapse = "|")
+outlier_samples_metadata.mel <- metadata %>% dplyr::filter(str_detect(sample, pattern))
+
+```
+
+### check excluded samples on PCA
+```{r PCA-of-outliers}
+outliers_list <- c("F26_KRT_PBS","F39_KRT_PBS","F42_KRT_PBS","F43_KRT_PBS","F60_KRT_PBS","F116_KRT_PBS","F120_KRT_PBS",
+                   "F26_KRT_IFNG","F39_KFT_IFNG","F42_KFT_IFNG","F43_KRT_IFNG","F60_KRT_IFNG","F112_KRT_IFNG",
+                   "F103_KRT_IFNB","F118_KRT_TNF")
+pattern <- str_c(outliers_list, collapse = "|")
+outlier_samples_metadata.krt <- metadata %>% dplyr::filter(str_detect(sample, pattern))
+
+outliers_list <- c("F108_MEL","F109_MEL","F110_MEL","F111_MEL","F51_MEL","F52_MEL","F61_MEL","F118_MEL","F133_MEL","F116_MEL_IFNG","F116_MEL_IFNG","F142_MEL_TNF","F42_MEL_PBS","F34_MEL_PBS","F30_MEL_IFNG")
+lowcounts_list <- c("F116_MEL_IFNG","F142_MEL_TNF","F42_MEL_PBS","F34_MEL_PBS","F30_MEL_IFNG")
+pattern <- str_c(outliers_list, collapse = "|")
+outlier_samples_metadata.mel <- metadata %>% dplyr::filter(str_detect(sample, pattern))
+
+outlier.mel <- outlier_samples_metadata.mel$sample
+outlier.krt <- outlier_samples_metadata.krt$sample
+
+this_log2CPM <- log2CPM[expressed_genes,]
+
+# Calculate Coefficient of Variation (COV)
+gene_means <- rowMeans(this_log2CPM)
+gene_sds <- apply(this_log2CPM, 1, sd)
+gene_cov <- gene_sds / gene_means
+
+# Remove genes with mean = 0 to avoid NaNs
+gene_cov[is.na(gene_cov)] <- 0
+
+# Select top N variable genes
+top_n <- 3000
+top_genes <- names(sort(gene_cov, decreasing = TRUE))[1:top_n]
+
+# Subset log2CPM
+log2CPM_subset <- log2CPM[top_genes, ]
+
+#calculate principal components for top 3000 COV genes' log2CPM
+pca_obj <- prcomp(t(log2CPM_subset), scale. = TRUE)
+
+pca_scores <- as.data.frame(pca_obj$x)  # this is samples × PCs
+pca_scores$sample_id <- colnames(counts)     # optional
+pca_scores$celltype <- metadata$celltype
+pca_scores$condition <- metadata$condition
+pca_scores$donor <- metadata$donor
+pca_scores$read_length <- metadata$read_length
+pca_scores$sequencing_platform <- metadata$sequencing_platform
+pca_scores$unique_aligned_reads_over_total <- metadata$unique_aligned_reads_over_total
+pca_scores$is_outlier <- ifelse(rownames(pca_scores)%in%unique(c(outlier.mel,outlier.krt)),"yes","no")
+
+# Get variance explained
+percent_var <- round(100 * (pca_obj$sdev^2 / sum(pca_obj$sdev^2)), 1)
+# Now use:
+xlab <- paste0("PC1 (", percent_var[1], "%)")
+ylab <- paste0("PC2 (", percent_var[2], "%)")
+
+p1 = ggplot(data=pca_scores, aes(
+  x = PC1,
+  y = PC2,
+  color = is_outlier,
+  #shape = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total,
+    "<br>outlier", is_outlier
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes",
+       color = "outlier", shape = "condition",
+       x = xlab, y = ylab) 
+
+# Then enable the hover text in plotly
+p1_interactive <- ggplotly(p1, tooltip = "text")
+p1_interactive
+
+### PC2 v PC3
+xlab <- paste0("PC2 (", percent_var[2], "%)")
+ylab <- paste0("PC3 (", percent_var[3], "%)")
+
+p2 = ggplot(data=pca_scores, aes(
+  x = PC2,
+  y = PC3,
+  color = is_outlier,
+  #shape = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total,
+    "<br>outlier", is_outlier
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes",
+       color = "outlier", shape = "condition",
+       x = xlab, y = ylab) 
+
+# Then enable the hover text in plotly
+p2_interactive <- ggplotly(p2, tooltip = "text")
+p2_interactive
+```
+## after removing outliers, redo DEA, expressed gene identification, PCA
+### compile count matrix, CPM, log2CPM after excluding outlier samples
+```{r exclude-outliers}
+outliers_list <- c("F26_KRT_PBS","F39_KRT_PBS","F42_KRT_PBS","F43_KRT_PBS","F60_KRT_PBS","F116_KRT_PBS","F120_KRT_PBS",
+                   "F26_KRT_IFNG","F39_KFT_IFNG","F42_KFT_IFNG","F43_KRT_IFNG","F60_KRT_IFNG","F112_KRT_IFNG",
+                   "F103_KRT_IFNB","F118_KRT_TNF")
+pattern <- str_c(outliers_list, collapse = "|")
+outlier_samples_metadata.krt <- metadata %>% dplyr::filter(str_detect(sample, pattern))
+outliers_list <- c("F108_MEL","F109_MEL","F110_MEL","F111_MEL","F51_MEL","F52_MEL","F61_MEL","F118_MEL","F133_MEL","F116_MEL_IFNG","F116_MEL_IFNG","F142_MEL_TNF","F42_MEL_PBS","F34_MEL_PBS","F30_MEL_IFNG")
+lowcounts_list <- c("F116_MEL_IFNG","F142_MEL_TNF","F42_MEL_PBS","F34_MEL_PBS","F30_MEL_IFNG")
+pattern <- str_c(outliers_list, collapse = "|")
+outlier_samples_metadata.mel <- metadata %>% dplyr::filter(str_detect(sample, pattern))
+
+outlier.mel <- outlier_samples_metadata.mel$sample
+outlier.krt <- outlier_samples_metadata.krt$sample
+
+counts.clean <- counts %>% dplyr::select(!unique(c(outlier.mel, outlier.krt)))
+metadata.clean <- metadata[metadata$sample%in%colnames(counts.clean),]
+# metadata.clean$sample%in%colnames(counts.clean)
+col.sum=apply(counts.clean,2,sum)
+CPM.clean=sweep(counts.clean, 2, col.sum, `/`)*1000000
+log2CPM.clean=log2(CPM.clean + 1)
+rm(col.sum)
+
+# convert meta gene to gene symbols
+CPM.clean.metaconverted <- CPM.clean %>%
+  rownames_to_column("gene") %>%
+  left_join(metagene_dict, by = c("gene" = "meta")) %>%
+  mutate(final_gene = if_else(is.na(name), gene, name)) %>%
+  select(-gene, -name) %>%
+  separate_rows(final_gene, sep = ",") %>%   # in case some name cells contain comma-separated genes
+  distinct(final_gene, .keep_all = TRUE)
+
+data.table::fwrite(CPM.clean.metaconverted, file="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/analysis_07142025/CPM.sampleFiltered.metaConverted.txt",
+                   quote=F, sep="\t")
+
+data.table::fwrite(metadata.clean,
+                   file="~/Downloads/nl/human/skin/eQTLs/RNA-Seq/analysis_07142025/metadata.sampleFiltered.txt",
+                   quote = F, sep = "\t")
+```
+### filter for expressed genes after outlier exclusion. An expressed gene shall have CPM >= 10 in at least 5 donors in a condition.
+```{r filter}
+conditions <- c("PBS", "IFNG", "IFNB", "TNF")
+celltypes <-c("FRB","MEL","KRT")
+expressed_genes_list <- list()
+
+for (ct in celltypes) {
+  gene_expression_status <- logical(nrow(CPM.clean))
+  
+  # Get sample names for this cell type
+  ct_samples <- colnames(CPM.clean)[grepl(paste0("_", ct, "_"), colnames(CPM.clean))]
+  
+  for (i in 1:nrow(CPM.clean)) {
+    is_expressed <- FALSE
+    for (cond in conditions) {
+      cond_samples <- ct_samples[grepl(paste0("_", cond), ct_samples)]
+      # Extract CPM values for this gene under this cell type and condition
+      cpm_values <- CPM.clean[i, cond_samples]
+      if (length(which(cpm_values>=10)) >= 5) {
+        is_expressed <- TRUE
+        break
+      }
+    }
+    
+    gene_expression_status[i] <- is_expressed
+  }
+  
+  expressed_genes_list[[ct]] <- rownames(CPM.clean)[gene_expression_status]
+}
+
+# Filter for expressed genes
+expressed_genes <- unique(unlist(expressed_genes_list))
+rm(celltypes, cond, cond_samples, conditions, ct, ct_samples, gene_expression_status, is_expressed)
+```
+### PCA after outlier exclusion
+```{r pca}
+this_matrix <- log2CPM.clean[expressed_genes, ]
+
+# Calculate Coefficient of Variation (COV)
+gene_means <- rowMeans(this_matrix)
+gene_sds <- apply(this_matrix, 1, sd)
+gene_cov <- gene_sds / gene_means
+
+# Remove genes with mean = 0 to avoid NaNs
+gene_cov[is.na(gene_cov)] <- 0
+
+# Select top N variable genes
+top_n <- 3000
+top_genes <- names(sort(gene_cov, decreasing = TRUE))[1:top_n]
+
+# Subset log2CPM
+log2CPM_subset <- this_matrix[top_genes, ]
+
+#calculate principal components for top 3000 COV genes' log2CPM
+pca_obj <- prcomp(t(log2CPM_subset), scale. = TRUE)
+
+pca_scores <- as.data.frame(pca_obj$x)  # this is samples × PCs
+pca_scores$sample_id <- colnames(counts.clean)     # optional
+pca_scores$celltype <- metadata.clean$celltype
+pca_scores$condition <- metadata.clean$condition
+pca_scores$donor <- metadata.clean$donor
+pca_scores$read_length <- metadata.clean$read_length
+pca_scores$sequencing_platform <- metadata.clean$sequencing_platform
+pca_scores$unique_aligned_reads_over_total <- metadata.clean$unique_aligned_reads_over_total
+pca_scores$total_reads <- metadata.clean$total_reads
+
+# Get variance explained
+percent_var <- round(100 * (pca_obj$sdev^2 / sum(pca_obj$sdev^2)), 1)
+# Now use:
+xlab <- paste0("PC1 (", percent_var[1], "%)")
+ylab <- paste0("PC2 (", percent_var[2], "%)")
+
+p1 = ggplot(data=pca_scores, aes(
+  x = PC1,
+  y = PC2,
+  color = condition,
+  #shape = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Tota_reads:", total_reads,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 696 samples\ntop 3000 COV expressed genes",
+       color = "celltype", shape = "condition",
+       x = xlab, y = ylab) 
+
+# Then enable the hover text in plotly
+p1_interactive <- ggplotly(p1, tooltip = "text")
+p1_interactive
+
+
+# Extract top PC1 and PC2 gene loadings
+top_pc1_genes <- names(sort(pca_obj$rotation[, 1], decreasing = TRUE)[1:30])
+top_pc2_genes <- names(sort(pca_obj$rotation[, 2], decreasing = TRUE)[1:30])
+
+# Combine and deduplicate
+top_genes <- unique(c(top_pc1_genes, top_pc2_genes))
+
+# Plot mean expression
+mean_CPM <- rowMeans(CPM[top_genes, ])
+barplot(mean_CPM, las=2, main="Mean CPM of top PC1/PC2 genes", col="steelblue")
+
+
+# Use directional projection of gene loadings onto the cell-type separation vector
+# Estimate centroids of each cell type in PC1–PC2 space:
+frb_center <- colMeans(pca_scores[pca_scores$celltype == "FRB", c("PC1", "PC2")])
+krt_center <- colMeans(pca_scores[pca_scores$celltype == "KRT", c("PC1", "PC2")])
+mel_center <- colMeans(pca_scores[pca_scores$celltype == "MEL", c("PC1", "PC2")])
+
+# Define the separation vector:
+# Vector from FRB to KRT
+vec_frb_to_krt <- krt_center - frb_center
+unit_frb_to_krt <- vec_frb_to_krt / sqrt(sum(vec_frb_to_krt^2))
+
+# Vector from FRB to MEL
+vec_frb_to_mel <- mel_center - frb_center
+unit_frb_to_mel <- vec_frb_to_mel / sqrt(sum(vec_frb_to_mel^2))
+
+# Vector from KRT to MEL
+vec_krt_to_mel <- mel_center - krt_center
+unit_krt_to_mel <- vec_krt_to_mel / sqrt(sum(vec_krt_to_mel^2))
+
+# Project each gene's PC1–PC2 loading onto the separation vector:
+# Get gene loading matrix for PC1 and PC2
+gene_loadings <- pca_obj$rotation[, 1:2]
+
+# Get top directional genes:
+# top_mel_genes_from_krt: genes that push samples from KRT → MEL
+proj_frb_to_krt <- gene_loadings %*% unit_frb_to_krt
+proj_frb_to_mel <- gene_loadings %*% unit_frb_to_mel
+proj_krt_to_mel <- gene_loadings %*% unit_krt_to_mel
+
+top_frb_genes_from_krt <- names(sort(proj_frb_to_krt[,1], decreasing = TRUE)[1:20])
+top_krt_genes_from_frb <- names(sort(proj_frb_to_krt[,1], decreasing = FALSE)[1:20])
+
+top_mel_genes_from_frb <- names(sort(proj_frb_to_mel[,1], decreasing = TRUE)[1:20])
+top_frb_genes_from_mel <- names(sort(proj_frb_to_mel[,1], decreasing = FALSE)[1:20])
+
+top_mel_genes_from_krt <- names(sort(proj_krt_to_mel[,1], decreasing = TRUE)[1:20])
+top_krt_genes_from_mel <- names(sort(proj_krt_to_mel[,1], decreasing = FALSE)[1:20])
+
+
+#### PC2 vs PC3 ####
+xlab <- paste0("PC2 (", percent_var[2], "%)")
+ylab <- paste0("PC3 (", percent_var[3], "%)")
+
+p2 = ggplot(data=pca_scores, aes(
+  x = PC2,
+  y = PC3,
+  color = sequencing_platform,
+  shape = celltype,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Tota_reads:", total_reads,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 696 samples\ntop 3000 COV expressed genes",
+       color = "sequencing_platform", shape = "celltype",
+       x = xlab, y = ylab) 
+p2_interactive <- ggplotly(p2, tooltip = "text")
+p2_interactive
+
+#### PC3 vs PC4 ####
+xlab <- paste0("PC3 (", percent_var[3], "%)")
+ylab <- paste0("PC4 (", percent_var[4], "%)")
+
+p3 = ggplot(data=pca_scores, aes(
+  x = PC3,
+  y = PC4,
+  color = condition,
+  shape = celltype,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Tota_reads:", total_reads,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 696 samples\ntop 3000 COV expressed genes",
+       color = "condition", shape = "celltype",
+       x = xlab, y = ylab) 
+p3_interactive <- ggplotly(p3, tooltip = "text")
+p3_interactive
+
+#### PC4 vs PC5 ####
+xlab <- paste0("PC4 (", percent_var[4], "%)")
+ylab <- paste0("PC5 (", percent_var[5], "%)")
+
+p4 = ggplot(data=pca_scores, aes(
+  x = PC4,
+  y = PC5,
+  color = condition,
+  shape = celltype,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Tota_reads:", total_reads,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 696 samples\ntop 3000 COV expressed genes",
+       color = "condition", shape = "celltype",
+       x = xlab, y = ylab) 
+p4_interactive <- ggplotly(p4, tooltip = "text")
+p4_interactive
+
+# which PC captures condition effect? bar plot 
+ggplot(pca_scores, aes(x = condition, y = PC6, fill = condition)) +
+  geom_boxplot() +
+  labs(title = "PC6 captures condition effect", y = paste0("PC6 (", percent_var[6], "%)"))
+
+# Run ANOVA across PCs to see which PC corresponds to "CONDITION"
+pca_scores$condition <- metadata.clean$condition
+
+# Loop through top 10 PCs
+for (i in 1:10) {
+  cat(paste0("PC", i, ": "))
+  print(summary(aov(pca_scores[,i] ~ pca_scores$condition)))
+}
+```
+```{r pca_MEL}
+this_matrix <- log2CPM.clean[expressed_genes, grepl("MEL",colnames(log2CPM.clean))]
+this_metadata <- metadata.clean[metadata.clean$sample%in%colnames(this_matrix),]
+# colnames(this_matrix)==this_metadata$sample
+
+# Calculate Coefficient of Variation (COV)
+gene_means <- rowMeans(this_matrix)
+gene_sds <- apply(this_matrix, 1, sd)
+gene_cov <- gene_sds / gene_means
+
+# Remove genes with mean = 0 to avoid NaNs
+gene_cov[is.na(gene_cov)] <- 0
+
+# Select top N variable genes
+top_n <- 3000
+top_genes <- names(sort(gene_cov, decreasing = TRUE))[1:top_n]
+
+# Subset log2CPM
+log2CPM_subset <- this_matrix[top_genes, ]
+
+#calculate principal components for top 3000 COV genes' log2CPM
+pca_obj <- prcomp(t(log2CPM_subset), scale. = TRUE)
+
+pca_scores <- as.data.frame(pca_obj$x)  # this is samples × PCs
+pca_scores$sample_id <- colnames(this_matrix)     # optional
+pca_scores$celltype <- this_metadata$celltype
+pca_scores$condition <- this_metadata$condition
+pca_scores$donor <- this_metadata$donor
+pca_scores$read_length <- this_metadata$read_length
+pca_scores$sequencing_platform <- this_metadata$sequencing_platform
+pca_scores$unique_aligned_reads_over_total <- this_metadata$unique_aligned_reads_over_total
+pca_scores$total_reads <- this_metadata$total_reads
+# Get variance explained
+percent_var <- round(100 * (pca_obj$sdev^2 / sum(pca_obj$sdev^2)), 1)
+# Now use:
+xlab <- paste0("PC1 (", percent_var[1], "%)")
+ylab <- paste0("PC2 (", percent_var[2], "%)")
+
+p1 = ggplot(data=pca_scores, aes(
+  x = PC1,
+  y = PC2,
+  color = condition,
+  shape = sequencing_platform,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total,
+    "<br>Total reads:", total_reads
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 167 melanocytes samples\ntop 3000 COV expressed genes",
+       color = "condition", shape = "sequencing_platform",
+       x = xlab, y = ylab) 
+
+# Then enable the hover text in plotly
+p1_interactive <- ggplotly(p1, tooltip = "text")
+p1_interactive
+
+
+# Extract top PC1 and PC2 gene loadings
+top_pc1_genes <- names(sort(pca_obj$rotation[, 1], decreasing = TRUE)[1:30])
+bottom_pc1_genes <- names(sort(pca_obj$rotation[, 1], decreasing = FALSE)[1:30])
+
+top_pc2_genes <- names(sort(pca_obj$rotation[, 2], decreasing = TRUE)[1:30])
+bottom_pc2_genes <- names(sort(pca_obj$rotation[, 2], decreasing = FALSE)[1:30])
+
+#### PC2 vs PC3 ####
+xlab <- paste0("PC2 (", percent_var[2], "%)")
+ylab <- paste0("PC3 (", percent_var[3], "%)")
+
+p2 = ggplot(data=pca_scores, aes(
+  x = PC2,
+  y = PC3,
+  color = sequencing_platform,
+  shape = celltype,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 167 MEL samples\ntop 3000 COV expressed genes",
+       color = "sequencing_platform", shape = "celltype",
+       x = xlab, y = ylab) 
+p2_interactive <- ggplotly(p2, tooltip = "text")
+p2_interactive
+
+#### PC3 vs PC4 ####
+xlab <- paste0("PC3 (", percent_var[3], "%)")
+ylab <- paste0("PC4 (", percent_var[4], "%)")
+
+p3 = ggplot(data=pca_scores, aes(
+  x = PC3,
+  y = PC4,
+  color = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes",
+       color = "condition", shape = "celltype",
+       x = xlab, y = ylab) 
+p3_interactive <- ggplotly(p3, tooltip = "text")
+p3_interactive
+
+# which PC captures condition effect? bar plot 
+ggplot(pca_scores, aes(x = condition, y = PC4, fill = condition)) +
+  geom_boxplot() +
+  labs(title = "PC4 captures condition effect", y = paste0("PC3 (", percent_var[3], "%)"))
+
+# Run ANOVA across PCs to see which PC corresponds to "CONDITION"
+pca_scores$condition <- metadata$condition
+
+# Loop through top 10 PCs
+for (i in 1:10) {
+  cat(paste0("PC", i, ": "))
+  print(summary(aov(pca_scores[,i] ~ pca_scores$condition)))
+}
+```
+### DEseq2
+```{r deseq2-mel}
+this_counts <- counts.clean[, metadata.clean$celltype == "MEL"]
+this_metadata <- metadata.clean[metadata.clean$celltype == "MEL",]
+this_metadata$condition <- as.character(this_metadata$condition)
+
+# Construct DESeqDataSet with all genes
+dds <- DESeqDataSetFromMatrix(countData = this_counts, colData = this_metadata,
+                              design = ~ sequencing_platform + condition)
+dds$condition <- relevel(factor(dds$condition), ref = "PBS")
+
+# Run DESeq
+dds.mel <- DESeq(dds)
+
+# DESeq2 results for MEL comparisons
+res.mel.ifng <- results(dds.mel, contrast = c("condition", "IFNG", "PBS"))
+res.mel.ifnb <- results(dds.mel, contrast = c("condition", "IFNB", "PBS"))
+res.mel.tnf  <- results(dds.mel, contrast = c("condition", "TNF",  "PBS"))
+
+# Filter significant DEGs (adj p < 0.05 and |log2FC| ≥ 1)
+# before outlier exclusion: 4062 IFNG DEGs, 2333 IFNB DEGs, 1866 TNF DEGs
+# after outlier exclusion: 5144 IFNG DEGs, 2572 IFNB DEGs, 1960 TNF DEGs
+deg.mel.ifng <- as.data.frame(res.mel.ifng)[which(res.mel.ifng$padj < 0.05 & abs(res.mel.ifng$log2FoldChange) >= 1), ] %>% rownames_to_column("gene")  %>% na.omit() %>% arrange(padj)
+deg.mel.ifnb <- as.data.frame(res.mel.ifnb)[which(res.mel.ifnb$padj < 0.05 & abs(res.mel.ifnb$log2FoldChange) >= 1), ] %>% rownames_to_column("gene")  %>% na.omit() %>% arrange(padj)
+deg.mel.tnf  <- as.data.frame(res.mel.tnf)[which(res.mel.tnf$padj < 0.05 & abs(res.mel.tnf$log2FoldChange) >= 1), ] %>% rownames_to_column("gene")  %>% na.omit() %>% arrange(padj)
+
+# MA plot
+plotMA(res.mel.ifng, main = "IFNG vs PBS (MEL)", ylim = c(-5, 5))
+
+# Volcano plot
+res.mel.ifng.df <- as.data.frame(res.mel.ifng)
+res.mel.ifng.df$significant <- with(res.mel.ifng.df, padj < 0.05 & abs(log2FoldChange) >= 1)
+
+ggplot(res.mel.ifng.df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(values = c("grey", "red")) +
+  theme_minimal() +
+  labs(title = "IFNG vs PBS (MEL)", x = "log2FC", y = "-log10(adj. p)")
+
+# make heatmap after removing batch effect
+# VST transform first
+vst.mel <- vst(dds.mel, blind = FALSE)
+expr.mat <- assay(vst.mel)  # genes x samples
+
+# Remove sequencing platform effect
+platform <- colData(vst.mel)$sequencing_platform
+expr.clean <- limma::removeBatchEffect(expr.mat, batch = platform)
+expr.clean <- expr.mat
+# plot heatmap
+library(ComplexHeatmap)
+library(circlize)
+
+# Select top genes
+top_genes <- unique(c(deg.mel.ifng$gene[1:50], deg.mel.ifnb$gene[1:50], deg.mel.tnf$gene[1:50]))
+mat <- expr.clean[top_genes, ]
+mat <- t(scale(t(mat))) # z-score by gene
+
+# Annotate samples
+ha = HeatmapAnnotation(
+  condition = this_metadata$condition,
+  col = list(condition = c("PBS" = "gray", "IFNG" = "red", "IFNB" = "blue", "TNF" = "gold"))
+)
+
+Heatmap(mat,
+        name = "zscore vst (corrected)",
+        top_annotation = ha,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        show_column_names = FALSE,
+        show_row_names = TRUE)
+```
+```{r deseq2-krt}
+this_counts <- counts.clean[, metadata.clean$celltype == "KRT"]
+this_metadata <- metadata.clean[metadata.clean$celltype == "KRT",]
+this_metadata$condition <- as.character(this_metadata$condition)
+colnames(this_counts)==this_metadata$sample
+
+# Construct DESeqDataSet with all genes
+dds <- DESeqDataSetFromMatrix(countData = this_counts, colData = this_metadata,
+                              design = ~ sequencing_platform + condition)
+dds$condition <- relevel(factor(dds$condition), ref = "PBS")
+
+# Run DESeq
+dds.krt <- DESeq(dds)
+
+# DESeq2 results for MEL comparisons
+res.krt.ifng <- results(dds.krt, contrast = c("condition", "IFNG", "PBS"))
+res.krt.ifnb <- results(dds.krt, contrast = c("condition", "IFNB", "PBS"))
+res.krt.tnf  <- results(dds.krt, contrast = c("condition", "TNF",  "PBS"))
+
+# Filter significant DEGs (adj p < 0.05 and |log2FC| ≥ 1)
+# before outlier exclusion: 2931 IFNG DEGs, 759 IFNB DEGs, 1036 TNF DEGs
+# after outlier exclusion: 3140 IFNG DEGs, 902 IFNB DEGs, 1107 TNF DEGs. gained some power.
+deg.krt.ifng <- as.data.frame(res.krt.ifng)[which(res.krt.ifng$padj < 0.05 & abs(res.krt.ifng$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.krt.ifnb <- as.data.frame(res.krt.ifnb)[which(res.krt.ifnb$padj < 0.05 & abs(res.krt.ifnb$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.krt.tnf  <- as.data.frame(res.krt.tnf)[which(res.krt.tnf$padj < 0.05 & abs(res.krt.tnf$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+```
+```{r deseq2-frb}
+## ----------------- FRB
+this_counts <- counts.clean[, metadata.clean$celltype == "FRB"]
+this_metadata <- metadata.clean[metadata.clean$celltype == "FRB",]
+this_metadata$condition <- as.character(this_metadata$condition)
+colnames(this_counts)==this_metadata$sample
+
+# Construct DESeqDataSet with all genes
+dds <- DESeqDataSetFromMatrix(countData = this_counts, colData = this_metadata,
+                              design = ~ sequencing_platform + condition)
+dds$condition <- relevel(factor(dds$condition), ref = "PBS")
+
+# Run DESeq
+dds.frb <- DESeq(dds)
+
+# DESeq2 results for MEL comparisons
+res.frb.ifng <- results(dds.frb, contrast = c("condition", "IFNG", "PBS"))
+res.frb.ifnb <- results(dds.frb, contrast = c("condition", "IFNB", "PBS"))
+res.frb.tnf  <- results(dds.frb, contrast = c("condition", "TNF",  "PBS"))
+
+# Filter significant DEGs (adj p < 0.05 and |log2FC| ≥ 1)
+# before outlier exclusion: 1327 IFNG DEGs, 2157 IFNB DEGs, 3380 TNF DEGs
+# after outlier exclusion: 1529 IFNG DEGs, 2439 IFNB DEGs, 3829 TNF DEGs. also gained power.
+deg.frb.ifng <- as.data.frame(res.frb.ifng)[which(res.frb.ifng$padj < 0.05 & abs(res.frb.ifng$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.frb.ifnb <- as.data.frame(res.frb.ifnb)[which(res.frb.ifnb$padj < 0.05 & abs(res.frb.ifnb$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.frb.tnf  <- as.data.frame(res.frb.tnf)[which(res.frb.tnf$padj < 0.05 & abs(res.frb.tnf$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+```
+```{r save}
+save(deg.frb.ifnb, deg.frb.ifng, deg.frb.tnf, 
+     deg.krt.ifnb, deg.krt.ifng, deg.krt.tnf, 
+     deg.mel.ifnb, deg.mel.ifng, deg.mel.tnf, file = paste0(Dir,"/all_degs_abslog2FC1_padj0.05_post_outlier_exclusion.RData"))
+```
+# --- loading Rdata is up to here.
+```{r deseq2-all}
+## ----------------- all cell types
+this_counts <- counts
+this_metadata <- metadata
+this_metadata$condition <- as.character(this_metadata$condition)
+this_metadata$celltype <- as.character(this_metadata$celltype)
+colnames(this_counts)==this_metadata$sample
+
+# Construct DESeqDataSet with all genes
+dds <- DESeqDataSetFromMatrix(countData = this_counts, colData = this_metadata,
+                              design = ~ donor + celltype + condition + celltype:condition)
+dds$condition <- relevel(factor(dds$condition), ref = "PBS")
+
+# Run DESeq
+dds.3ct <- DESeq(dds)
+
+# DESeq2 results for MEL comparisons
+res.3ct.ifng <- results(dds.3ct, contrast = c("condition", "IFNG", "PBS"))
+res.3ct.ifnb <- results(dds.3ct, contrast = c("condition", "IFNB", "PBS"))
+res.3ct.tnf  <- results(dds.3ct, contrast = c("condition", "TNF",  "PBS"))
+
+# Filter significant DEGs (adj p < 0.05 and |log2FC| ≥ 1)
+deg.3ct.ifng <- as.data.frame(res.3ct.ifng)[which(res.3ct.ifng$padj < 0.05 & abs(res.3ct.ifng$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.3ct.ifnb <- as.data.frame(res.3ct.ifnb)[which(res.3ct.ifnb$padj < 0.05 & abs(res.3ct.ifnb$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+deg.3ct.tnf  <- as.data.frame(res.3ct.tnf)[which(res.3ct.tnf$padj < 0.05 & abs(res.3ct.tnf$log2FoldChange) >= 1), ] %>% rownames_to_column("gene") %>% na.omit() %>% arrange(padj)
+
+vsd.3ct <- vst(dds.3ct, blind = FALSE) # this gives me globally transformed expression matrix
+counts_norm <- counts(dds, normalized=TRUE)  # DESeq2-normalized counts (not library size scaled)
+cpm_mat <- t(t(counts_norm) / colSums(counts_norm)) * 1e6
+
+rm(this_counts, this_metadata, dds)
+save.image(file=paste0(Dir,'/myEnvironment_main.RData'))
+```
+### Heatmap
+Heatmap of all samples
+```{r heatmap-log2(CPM+1)-outlier-excluded}
+vars_deg <- ls(pattern = "^deg.")
+gene_lists <- lapply(vars_deg, function(var) {
+  get(var)$gene
+})
+expressed_DEG <- intersect(unique(unlist(expressed_genes_list)), 
+                               unique(unlist(gene_lists)))
+
+CPM_DEG <- CPM.clean[expressed_DEG,]
+log2CPM_DEG <- log2(CPM_DEG + 1)
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(log2CPM_DEG, 14)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+                        rep(6,km_res$breaks[6]-km_res$breaks[5]),
+                        rep(7,km_res$breaks[7]-km_res$breaks[6]),
+                        rep(8,km_res$breaks[8]-km_res$breaks[7]),
+                        rep(9,km_res$breaks[9]-km_res$breaks[8]),
+                        rep(10,km_res$breaks[10]-km_res$breaks[9]),
+                        rep(11,km_res$breaks[11]-km_res$breaks[10]),
+                        rep(12,km_res$breaks[12]-km_res$breaks[11]),
+                        rep(13,km_res$breaks[13]-km_res$breaks[12]),
+                        rep(14,nrow(km_res$clustered)-km_res$breaks[13]))
+km_res.rna <- km_res
+split_instructions.rna <- split_instructions
+rm(km_res, split_instructions)
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap <- km_res.rna$clustered[,1:ncol(CPM_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+
+# 5. plot heatmap
+colnames(zlogCPM.heatmap)==metadata$sample
+
+metadata.clean$biosample = paste0(metadata.clean$donor,"_",metadata.clean$celltype,"_",metadata.clean$condition)
+column_ha = HeatmapAnnotation(
+  condition = metadata.clean$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = metadata.clean$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "#999999", "IFNG" = "#D7263D", "IFNB" = "#1E88E5", "TNF" = "#FFC107"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+pdf(paste0(Dir,"/heatmap_RNAseq_3ctk_outlier-excluded_allDEG_14kmm-hc_08052025_padj0.05_abslog2FC1_avgCPM10.pdf"),width=24,height=30)
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap, 
+                            name = "z-score log2CPM",
+                            top_annotation = column_ha,
+                            right_annotation = row_ha,
+                            column_title = "DE genes in 3 celltypes, IFNg/IFNb/TNF stimulated, , known IFNg inducible genes labeled",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(metadata.clean$biosample[grepl("FRB_PBS",metadata.clean$biosample)])), 
+                                             rep(2,length(metadata.clean$biosample[grepl("KRT_PBS",metadata.clean$biosample)])), 
+                                             rep(3,length(metadata.clean$biosample[grepl("MEL_PBS",metadata.clean$biosample)])), 
+                                             rep(4,length(metadata.clean$biosample[grepl("FRB_IFNG",metadata.clean$biosample)])), 
+                                             rep(5,length(metadata.clean$biosample[grepl("KRT_IFNG",metadata.clean$biosample)])),
+                                             rep(6,length(metadata.clean$biosample[grepl("MEL_IFNG",metadata.clean$biosample)])),
+                                             rep(7,length(metadata.clean$biosample[grepl("FRB_IFNB",metadata.clean$biosample)])), 
+                                             rep(8,length(metadata.clean$biosample[grepl("KRT_IFNB",metadata.clean$biosample)])), 
+                                             rep(9,length(metadata.clean$biosample[grepl("MEL_IFNB",metadata.clean$biosample)])), 
+                                             rep(10,length(metadata.clean$biosample[grepl("FRB_TNF",metadata.clean$biosample)])), 
+                                             rep(11,length(metadata.clean$biosample[grepl("KRT_TNF",metadata.clean$biosample)])),
+                                             rep(12,length(metadata.clean$biosample[grepl("MEL_TNF",metadata.clean$biosample)]))),
+                            row_split = split_instructions.rna, 
+                            show_row_names = FALSE,
+                            row_title_rot = 0,
+                            column_names_rot = 45,
+                            row_gap = unit(0, "mm"),
+                            border = TRUE,
+                            column_names_gp = gpar(fontsize = 10),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+cluster1_genes = rownames(km_res.rna$clustered)[which(split_instructions.rna==1)]
+
+for (i in 1:14){
+  this_cluster_genes = rownames(km_res.rna$clustered)[which(split_instructions.rna==i)]
+  write(this_cluster_genes, file=paste0(Dir,"/inducedGenes_log2FC1.5_cluster",as.character(i),".txt"))
+}
+
+```
+Heatmap per cytokine
+```{r heatmap-PBS-IFNG}
+# prep data table ####
+vars_deg <- ls(pattern = "^deg.*ifng")
+#gene_lists <- lapply(vars_deg, function(var) {
+#  get(var)$gene
+#})
+gene_lists <- lapply(vars_deg, function(var) {
+  df <- get(var)
+  # keep only significant, upregulated genes
+  df %>%
+    filter(log2FoldChange > 1.5, padj < 0.01) %>%
+    pull(gene)   # or `rownames(df)` if genes are rownames
+})
+expressed_DEG <- intersect(unique(unlist(expressed_genes_list)), 
+                               unique(unlist(gene_lists)))
+
+CPM_DEG <- CPM.clean[expressed_DEG,] %>% 
+  dplyr::select(matches("PBS|IFNG"))
+log2CPM_DEG <- log2(CPM_DEG + 1)
+this_metadata <- metadata.clean %>% 
+  dplyr::filter(sample%in%colnames(CPM_DEG)) %>%
+  mutate(biosample = paste0(donor,"_",celltype,"_",condition))
+this_metadata$sample==colnames(CPM_DEG)
+
+
+# pheatmap
+z_mat <- t(scale(t(log2CPM_DEG)))
+my_cols  <- colorRampPalette(rev(brewer.pal(11, "RdBu")))(101)
+my_breaks <- seq(-2.5, 2.5, length.out = 101)  # clip extremes for readability
+pheatmap(
+  z_mat,
+  scale = "none",                         # already scaled
+  color = my_cols, breaks = my_breaks,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  clustering_method = "ward.D2",
+  show_rownames = FALSE, show_colnames = FALSE,
+  fontsize = 10, border_color = NA
+)
+
+# cluster ####
+# split rows by determined number of clusters
+km_res <- readRDS(paste0(Dir,"/km_res_for_heatmap_RNAseq_3ctk_outlier-excluded_IFNGDEG_6kmm-hc_03102026_padj0.01_log2FC1.5_avgCPM10.rds"))
+km_res <- niceKmeans(log2CPM_DEG, 6)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+                        rep(6,nrow(km_res$clustered)-km_res$breaks[5]))
+km_res.rna <- km_res
+split_instructions.rna <- split_instructions
+rm(km_res, split_instructions)
+#saveRDS(km_res.rna, file = paste0(Dir,"/km_res_for_heatmap_RNAseq_3ctk_outlier-excluded_IFNGDEG_6kmm-hc_03102026_padj0.01_log2FC1.5_avgCPM10.rds"))
+
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap <- km_res.rna$clustered[,1:ncol(CPM_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+
+# plot heatmap ####
+colnames(zlogCPM.heatmap)==this_metadata$sample
+
+column_ha = HeatmapAnnotation(
+  condition = this_metadata$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = this_metadata$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "#999999", "IFNG" = "#D7263D", "IFNB" = "#1E88E5", "TNF" = "#FFC107"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+# old heatmap: heatmap_RNAseq_3ctk_outlier-excluded_IFNGDEG_6kmm-hc_08082025_padj0.01_log2FC1.5_avgCPM10.pdf
+# 
+pdf(paste0(Dir,"/heatmap_RNAseq_3ctk_outlier-excluded_IFNGDEG_6kmm-hc_03102026_padj0.01_log2FC1.5_avgCPM10.pdf"),width=24,height=30)
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap, 
+                            name = "z-score log2CPM",
+                            top_annotation = column_ha,
+                            right_annotation = row_ha,
+                            column_title = "upregulated DE genes in 3 celltypes, Ctrl vs IFNg stimulated, , known IFNg inducible genes labeled",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(this_metadata$biosample[grepl("FRB_PBS",this_metadata$biosample)])), 
+                                             rep(2,length(this_metadata$biosample[grepl("KRT_PBS",this_metadata$biosample)])), 
+                                             rep(3,length(this_metadata$biosample[grepl("MEL_PBS",this_metadata$biosample)])), 
+                                             rep(4,length(this_metadata$biosample[grepl("FRB_IFNG",this_metadata$biosample)])), 
+                                             rep(5,length(this_metadata$biosample[grepl("KRT_IFNG",this_metadata$biosample)])),
+                                             rep(6,length(this_metadata$biosample[grepl("MEL_IFNG",this_metadata$biosample)])),
+                                             rep(7,length(this_metadata$biosample[grepl("FRB_IFNB",this_metadata$biosample)])), 
+                                             rep(8,length(this_metadata$biosample[grepl("KRT_IFNB",this_metadata$biosample)])), 
+                                             rep(9,length(this_metadata$biosample[grepl("MEL_IFNB",this_metadata$biosample)])), 
+                                             rep(10,length(this_metadata$biosample[grepl("FRB_TNF",this_metadata$biosample)])), 
+                                             rep(11,length(this_metadata$biosample[grepl("KRT_TNF",this_metadata$biosample)])),
+                                             rep(12,length(this_metadata$biosample[grepl("MEL_TNF",this_metadata$biosample)]))),
+                            row_split = split_instructions.rna, 
+                            show_row_names = FALSE,
+                            show_column_names = FALSE,
+                            row_title_rot = 0,
+                            #column_names_rot = 45,
+                            row_gap = unit(0, "mm"),
+                            border = TRUE,
+                            #column_names_gp = gpar(fontsize = 10),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+
+
+
+# ---- Analysis for each cluster ---- ####
+for (i in 1:6){
+  this_cluster_genes = rownames(km_res.rna$clustered)[which(split_instructions.rna==i)]
+  write(this_cluster_genes, file=paste0(Dir,"/IFNG_inducedGenes_log2FC1.5_cluster",as.character(i),".txt"))
+}
+#
+vars_res <- ls(pattern = "^res.*ifng")
+gene_lists <- lapply(vars_res, function(var) {
+  get(var)$gene
+})
+expressed_genes.krt <- intersect(unique(unlist(expressed_genes_list)), 
+                               unique(unlist(gene_lists)))
+# cluster 3
+i=c(5)
+this_cluster_genes = rownames(km_res.rna$clustered)[which(split_instructions.rna %in% i)]
+this_metagenes_idx <- which(grepl("meta", this_cluster_genes))
+temp1 <- data.frame(meta=this_cluster_genes[-this_metagenes_idx], 
+                    name=this_cluster_genes[-this_metagenes_idx])
+temp2 <- data.frame(meta=this_cluster_genes[this_metagenes_idx]) %>%
+  left_join(., metagene_dict, join_by(meta))
+temp3 <- rbind(temp1, temp2) %>% set_colnames(c("meta","gene"))
+gene_ids <- convert_to_entrez(convert_meta_genes(temp3$gene))$ENTREZID
+
+this_res <- as.data.frame(res.frb.ifng) %>%
+  rownames_to_column("meta") %>%
+  dplyr::filter(meta %in% temp3$meta) %>%
+  left_join(temp3) %>%
+  arrange(padj)
+
+ego <- enrichGO(gene         = gene_ids,
+                OrgDb        = org.Hs.eg.db,
+                keyType = "ENTREZID",
+                ont          = "BP",       # Biological Process
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.1,
+                qvalueCutoff = 0.1,
+                readable      = TRUE)
+
+ego.sig <- ego@result[ego@result$p.adjust<0.05,]
+
+
+```
+
+Heatmap per celltype
+```{r heatmap-KRT}
+vars_deg <- ls(pattern = "^deg.krt")
+#gene_lists <- lapply(vars_deg, function(var) {
+#  get(var)$gene
+#})
+gene_lists <- lapply(vars_deg, function(var) {
+  df <- get(var)
+  # keep only significant, upregulated genes
+  df %>%
+    filter(log2FoldChange > 1.5, padj < 0.01) %>%
+    pull(gene)   # or `rownames(df)` if genes are rownames
+})
+expressed_DEG <- intersect(unique(unlist(expressed_genes_list)), 
+                               unique(unlist(gene_lists)))
+
+CPM_DEG <- CPM.clean[expressed_DEG,] %>% 
+  dplyr::select(matches("KRT"))
+log2CPM_DEG <- log2(CPM_DEG + 1)
+this_metadata <- metadata.clean %>% 
+  dplyr::filter(sample%in%colnames(CPM_DEG)) %>%
+  mutate(biosample = paste0(donor,"_",celltype,"_",condition))
+this_metadata$sample==colnames(CPM_DEG)
+
+# split rows by determined number of clusters
+# km_res <- niceKmeans(log2CPM_DEG, 5)
+# split_instructions <- c(rep(1,km_res$breaks[1]), 
+#                         rep(2,km_res$breaks[2]-km_res$breaks[1]),
+#                         rep(3,km_res$breaks[3]-km_res$breaks[2]),
+#                         rep(4,km_res$breaks[4]-km_res$breaks[3]),
+#                         rep(5,nrow(km_res$clustered)-km_res$breaks[4]))
+#saveRDS(km_res, file=paste0(Dir,"km_res_for_heatmap_RNAseq_KRT_allcytokines_outlier-excluded_inducedGenes_5km_03162026_padj0.01_log2FC1.5_avgCPM10.rds"))
+km_res.rna <- readRDS(paste0(Dir,"km_res_for_heatmap_RNAseq_KRT_allcytokines_outlier-excluded_inducedGenes_5km_03162026_padj0.01_log2FC1.5_avgCPM10.rds"))
+# remap class based on my preference
+km_res.rna$clustered <- km_res.rna$clustered %>%
+  mutate(
+    class = case_when(
+      class == 5 ~ 1L,
+      class == 1 ~ 2L,
+      class == 2 ~ 3L,
+      class == 3 ~ 4L,
+      class == 4 ~ 5L
+    )
+  ) %>%
+  arrange(class)
+
+split_instructions.rna <- km_res.rna$clustered$class
+
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap <- km_res.rna$clustered[,1:ncol(CPM_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+
+# 5. plot heatmap
+colnames(zlogCPM.heatmap)==this_metadata$sample
+
+column_ha = HeatmapAnnotation(
+  celltype = this_metadata$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  condition = this_metadata$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  
+  col = list(celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF"),
+             condition = c("PBS" = "#999999", "IFNG" = "#D7263D", "IFNB" = "#1E88E5", "TNF" = "#FFC107")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+pdf(paste0(Dir,"/heatmap_RNAseq_3ctk_outlier-excluded_all-KRT-DEG_5kmm-hc_03132026_padj0.01_log2FC1.5_avgCPM10.pdf"),width=24,height=30)
+# png(paste0(Dir,"/heatmap_RNAseq_3ctk_outlier-excluded_all-KRT-DEG_5kmm-hc_03132026_padj0.01_log2FC1.5_avgCPM10.png"),
+#   width = 24, height = 30, units = "in", res = 300)
+
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap, 
+                            name = "z-score log2CPM",
+                            top_annotation = column_ha,
+                            #right_annotation = row_ha,
+                            column_title = "upregulated DE genes in KRT, Ctrl vs IFNg/IFNb/TNFa stimulated",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(this_metadata$biosample[grepl("FRB_PBS",this_metadata$biosample)])), 
+                                             rep(2,length(this_metadata$biosample[grepl("KRT_PBS",this_metadata$biosample)])), 
+                                             rep(3,length(this_metadata$biosample[grepl("MEL_PBS",this_metadata$biosample)])), 
+                                             rep(4,length(this_metadata$biosample[grepl("FRB_IFNG",this_metadata$biosample)])), 
+                                             rep(5,length(this_metadata$biosample[grepl("KRT_IFNG",this_metadata$biosample)])),
+                                             rep(6,length(this_metadata$biosample[grepl("MEL_IFNG",this_metadata$biosample)])),
+                                             rep(7,length(this_metadata$biosample[grepl("FRB_IFNB",this_metadata$biosample)])), 
+                                             rep(8,length(this_metadata$biosample[grepl("KRT_IFNB",this_metadata$biosample)])), 
+                                             rep(9,length(this_metadata$biosample[grepl("MEL_IFNB",this_metadata$biosample)])), 
+                                             rep(10,length(this_metadata$biosample[grepl("FRB_TNF",this_metadata$biosample)])), 
+                                             rep(11,length(this_metadata$biosample[grepl("KRT_TNF",this_metadata$biosample)])),
+                                             rep(12,length(this_metadata$biosample[grepl("MEL_TNF",this_metadata$biosample)]))),
+                            row_split = split_instructions.rna, 
+                            show_row_names = FALSE,
+                            show_column_names = FALSE,
+                            row_title_rot = 0,
+                            #column_names_rot = 45,
+                            row_gap = unit(3, "mm"),
+                            column_gap = unit(3, "mm"),
+                            border = TRUE,
+                            #column_names_gp = gpar(fontsize = 10),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+
+for (i in 1:5){
+  this_cluster_genes = convert_meta_genes(rownames(km_res.rna$clustered)[which(split_instructions.rna==i)])
+  write(this_cluster_genes, file=paste0(Dir,"/inducedGenes_log2FC1.5_cluster",as.character(i),".txt"))
+}
+
+this_cluster_genes
+gene="MUC1"
+#plot_violinbox_plot_cytokine_faceted(gene)
+p = plot_violinbox_plot_cytokine_faceted_by_celltype_grouped_by_phase(gene) 
+
+# plot all the genes
+pdf(paste0(Dir, "KRT_allcytokines_cluster6_gene_violinplots_03162026.pdf"), width = 12, height = 6)
+for (gene in this_cluster_genes) {
+  p <- plot_violinbox_plot(gene) +
+       ggtitle(gene)
+  print(p)
+  message(gene)
+}
+dev.off()
+
+```
+
+```{r pca for each cluster}
+# ----------------------------
+# 1. Subset matrix to cluster genes
+# ----------------------------
+cluster_genes_use <- intersect(this_cluster_genes, rownames(log2CPM.clean))
+
+if (length(cluster_genes_use) < 2) {
+  stop("Fewer than 2 genes from this_cluster_genes found in log2CPM.clean")
+}
+
+this_matrix <- log2CPM.clean[cluster_genes_use, , drop = FALSE]
+
+# Optional: remove zero-variance genes
+gene_sds <- apply(this_matrix, 1, sd, na.rm = TRUE)
+this_matrix <- this_matrix[gene_sds > 0, , drop = FALSE]
+
+if (nrow(this_matrix) < 2) {
+  stop("Fewer than 2 non-zero-variance genes remain for PCA")
+}
+
+# ----------------------------
+# 2. PCA on samples using cluster genes only
+# ----------------------------
+pca_obj <- prcomp(t(this_matrix), scale. = TRUE)
+
+pca_scores <- as.data.frame(pca_obj$x)
+pca_scores$sample_id <- colnames(this_matrix)
+pca_scores$celltype <- metadata.clean$celltype
+pca_scores$condition <- metadata.clean$condition
+pca_scores$donor <- metadata.clean$donor
+pca_scores$read_length <- metadata.clean$read_length
+pca_scores$sequencing_platform <- metadata.clean$sequencing_platform
+pca_scores$unique_aligned_reads_over_total <- metadata.clean$unique_aligned_reads_over_total
+pca_scores$total_reads <- metadata.clean$total_reads
+
+# Variance explained
+percent_var <- round(100 * (pca_obj$sdev^2 / sum(pca_obj$sdev^2)), 1)
+xlab <- paste0("PC1 (", percent_var[1], "%)")
+ylab <- paste0("PC2 (", percent_var[2], "%)")
+
+# ----------------------------
+# 3. PCA plot colored by sequencing platform
+# ----------------------------
+library(ggplot2)
+library(plotly)
+
+p_platform <- ggplot(
+  data = pca_scores,
+  aes(
+    x = PC1,
+    y = PC2,
+    color = sequencing_platform,
+    shape = condition,
+    text = paste(
+      "Sample:", sample_id,
+      "<br>Donor:", donor,
+      "<br>Condition:", condition,
+      "<br>Celltype:", celltype,
+      "<br>Sequencing platform:", sequencing_platform,
+      "<br>Read length:", read_length,
+      "<br>Total reads:", total_reads,
+      "<br>Aligned:", unique_aligned_reads_over_total
+    )
+  )
+) +
+  geom_point(size = 3, alpha = 0.9) +
+  labs(
+    title = paste0(
+      "PCA using cluster genes only (n = ", nrow(this_matrix), ")"
+    ),
+    x = xlab,
+    y = ylab,
+    color = "Sequencing platform",
+    shape = "Condition"
+  ) +
+  theme_bw()
+
+p_platform_interactive <- ggplotly(p_platform, tooltip = "text")
+p_platform_interactive
+```
+
+## Skip: Combat-seq correction necessary? Probably not. main heatmap still shows a cluster with batch separation. 
+```{r heatmap-Combat-seq-corrected-outlier-excluded}
+# perform the batch correction
+# transform the format of our groups and batches from names to numbers (e.g. 1, 2, etc.)
+groups = sapply(as.character(metadata.clean$condition), switch, "PBS" = 1, "IFNG" = 2, "IFNB" = 3, "TNF" = 4, USE.NAMES = F)
+seq_platform = as.numeric(as.factor(metadata.clean$sequencing_platform))
+
+# perform batch correction
+counts.corrected = ComBat_seq(counts = as.matrix(counts.clean), batch = seq_platform, group = groups)
+col.sum=apply(counts.corrected,2,sum)
+CPM.clean.corrected=sweep(counts.corrected, 2, col.sum, `/`)*1000000
+log2CPM.clean.corrected=log2(CPM.clean.corrected+1)
+rm(groups, donor, col.sum)
+
+# make heatmap after removing batch effect using Combat-seq
+vars_deg <- ls(pattern = "^deg.")
+gene_lists <- lapply(vars_deg, function(var) {
+  get(var)$gene
+})
+expressed_DEG <- intersect(unique(unlist(expressed_genes_list)), 
+                               unique(unlist(gene_lists)))
+
+CPM_DEG <- CPM.clean.corrected[expressed_DEG,]
+log2CPM_DEG <- log2(CPM_DEG + 1)
+
+# split rows by determined number of clusters
+km_res <- niceKmeans(log2CPM_DEG, 14)
+split_instructions <- c(rep(1,km_res$breaks[1]), 
+                        rep(2,km_res$breaks[2]-km_res$breaks[1]),
+                        rep(3,km_res$breaks[3]-km_res$breaks[2]),
+                        rep(4,km_res$breaks[4]-km_res$breaks[3]),
+                        rep(5,km_res$breaks[5]-km_res$breaks[4]),
+                        rep(6,km_res$breaks[6]-km_res$breaks[5]),
+                        rep(7,km_res$breaks[7]-km_res$breaks[6]),
+                        rep(8,km_res$breaks[8]-km_res$breaks[7]),
+                        rep(9,km_res$breaks[9]-km_res$breaks[8]),
+                        rep(10,km_res$breaks[10]-km_res$breaks[9]),
+                        rep(11,km_res$breaks[11]-km_res$breaks[10]),
+                        rep(12,km_res$breaks[12]-km_res$breaks[11]),
+                        rep(13,km_res$breaks[13]-km_res$breaks[12]),
+                        rep(14,nrow(km_res$clustered)-km_res$breaks[13]))
+km_res.rna <- km_res
+split_instructions.rna <- split_instructions
+rm(km_res, split_instructions)
+
+# 4. load genes of interest
+g <- data.table::fread("~/Downloads/nl/human/skin/eQTLs/literature/KEGG/GSEA_hallmark-genes-upregulated-in-response-to-IFNG.txt",header=F)$V1
+zlogCPM.heatmap <- km_res.rna$clustered[,1:ncol(CPM_DEG)]
+zlogCPM.heatmap_with_gene <- zlogCPM.heatmap %>% dplyr::filter(rownames(.) %in% g)
+row_anno_index <- which(rownames(zlogCPM.heatmap) %in% rownames(zlogCPM.heatmap_with_gene))
+row_anno_label <- rownames(zlogCPM.heatmap)[row_anno_index]
+
+# 5. plot heatmap
+colnames(zlogCPM.heatmap)==metadata.clean$sample
+metadata.clean$biosample = paste0(metadata.clean$donor,"_",metadata.clean$celltype,"_",metadata.clean$condition)
+
+column_ha = HeatmapAnnotation(
+  condition = metadata.clean$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[3]) %>% unlist(),
+  celltype = metadata.clean$biosample %>% 
+    lapply( . , function(x) unlist(strsplit(x , "_", ))[2]) %>% unlist(),
+  col = list(condition = c("PBS" = "#999999", "IFNG" = "#D7263D", "IFNB" = "#1E88E5", "TNF" = "#FFC107"),
+             celltype = c("KRT" = "#DAF7A6", "MEL" = "#964B00", "FRB" = "#CCCCFF")),
+  show_legend = c(TRUE,TRUE))
+
+row_ha = rowAnnotation(
+  foo = anno_mark(at = row_anno_index, 
+                  labels = row_anno_label,
+                  which="row",
+                  labels_gp = gpar(fontsize=10),
+                  padding=unit(0.5,"mm")))
+
+pdf(paste0(Dir,"/heatmap_RNAseq_3ctk_outlier-excluded_CombatCorrected_allDEG_14kmm-hc_08052025_padj0.05_abslog2FC1_avgCPM10.pdf"),width=24,height=30)
+heatmap.rna <- draw(Heatmap(zlogCPM.heatmap, 
+                            name = "z-score log2CPM Seq_platform corrected",
+                            top_annotation = column_ha,
+                            right_annotation = row_ha,
+                            column_title = "DE genes in 3 celltypes, IFNg/IFNb/TNF stimulated, , known IFNg inducible genes labeled",
+                            cluster_columns = FALSE,
+                            cluster_rows = FALSE,
+                            column_split = c(rep(1,length(metadata.clean$biosample[grepl("FRB_PBS",metadata.clean$biosample)])), 
+                                             rep(2,length(metadata.clean$biosample[grepl("KRT_PBS",metadata.clean$biosample)])), 
+                                             rep(3,length(metadata.clean$biosample[grepl("MEL_PBS",metadata.clean$biosample)])), 
+                                             rep(4,length(metadata.clean$biosample[grepl("FRB_IFNG",metadata.clean$biosample)])), 
+                                             rep(5,length(metadata.clean$biosample[grepl("KRT_IFNG",metadata.clean$biosample)])),
+                                             rep(6,length(metadata.clean$biosample[grepl("MEL_IFNG",metadata.clean$biosample)])),
+                                             rep(7,length(metadata.clean$biosample[grepl("FRB_IFNB",metadata.clean$biosample)])), 
+                                             rep(8,length(metadata.clean$biosample[grepl("KRT_IFNB",metadata.clean$biosample)])), 
+                                             rep(9,length(metadata.clean$biosample[grepl("MEL_IFNB",metadata.clean$biosample)])), 
+                                             rep(10,length(metadata.clean$biosample[grepl("FRB_TNF",metadata.clean$biosample)])), 
+                                             rep(11,length(metadata.clean$biosample[grepl("KRT_TNF",metadata.clean$biosample)])),
+                                             rep(12,length(metadata.clean$biosample[grepl("MEL_TNF",metadata.clean$biosample)]))),
+                            row_split = split_instructions.rna, 
+                            show_row_names = FALSE,
+                            row_title_rot = 0,
+                            column_names_rot = 45,
+                            row_gap = unit(0, "mm"),
+                            border = TRUE,
+                            column_names_gp = gpar(fontsize = 10),
+                            column_title_gp = gpar(fontsize = 10, fontface = "bold"),
+                            row_title_gp = gpar(fontsize = 10, fontface = "bold")))
+dev.off()
+cluster1_genes = rownames(km_res.rna$clustered)[which(split_instructions.rna==1)]
+
+for (i in 1:14){
+  this_cluster_genes = rownames(km_res.rna$clustered)[which(split_instructions.rna==i)]
+  write(this_cluster_genes, file=paste0(Dir,"/inducedGenes_log2FC1.5_cluster",as.character(i),".txt"))
+}
+
+```
+```{r PCA-of-outliers}
+#log2CPM.clean.corrected=log2(CPM.clean.corrected+1)
+this_log2CPM <- log2CPM.clean.corrected[expressed_genes,]
+
+# Calculate Coefficient of Variation (COV)
+gene_means <- rowMeans(this_log2CPM)
+gene_sds <- apply(this_log2CPM, 1, sd)
+gene_cov <- gene_sds / gene_means
+
+# Remove genes with mean = 0 to avoid NaNs
+gene_cov[is.na(gene_cov)] <- 0
+
+# Select top N variable genes
+top_n <- 3000
+top_genes <- names(sort(gene_cov, decreasing = TRUE))[1:top_n]
+
+# Subset log2CPM
+log2CPM_subset <- this_log2CPM[top_genes, ]
+
+#calculate principal components for top 3000 COV genes' log2CPM
+pca_obj <- prcomp(t(log2CPM_subset), scale. = TRUE)
+
+pca_scores <- as.data.frame(pca_obj$x)  # this is samples × PCs
+pca_scores$sample_id <- colnames(counts.clean)     # optional
+pca_scores$celltype <- metadata.clean$celltype
+pca_scores$condition <- metadata.clean$condition
+pca_scores$donor <- metadata.clean$donor
+pca_scores$read_length <- metadata.clean$read_length
+pca_scores$sequencing_platform <- metadata.clean$sequencing_platform
+pca_scores$unique_aligned_reads_over_total <- metadata.clean$unique_aligned_reads_over_total
+pca_scores$is_outlier <- ifelse(rownames(pca_scores)%in%unique(c(outlier.mel,outlier.krt)),"yes","no")
+
+# Get variance explained
+percent_var <- round(100 * (pca_obj$sdev^2 / sum(pca_obj$sdev^2)), 1)
+# Now use:
+xlab <- paste0("PC1 (", percent_var[1], "%)")
+ylab <- paste0("PC2 (", percent_var[2], "%)")
+
+p1 = ggplot(data=pca_scores, aes(
+  x = PC1,
+  y = PC2,
+  color = celltype,
+  #shape = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total,
+    "<br>outlier", is_outlier
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes\nSeq_platform corrected",
+       color = "outlier", shape = "condition",
+       x = xlab, y = ylab) 
+
+# Then enable the hover text in plotly
+p1_interactive <- ggplotly(p1, tooltip = "text")
+p1_interactive
+
+### PC2 v PC3
+xlab <- paste0("PC2 (", percent_var[2], "%)")
+ylab <- paste0("PC3 (", percent_var[3], "%)")
+
+p2 = ggplot(data=pca_scores, aes(
+  x = PC2,
+  y = PC3,
+  color = celltype,
+  shape = condition,
+  text = paste(
+    "Sample:", rownames(pca_scores),
+    "<br>Donor:", donor,
+    "<br>Condition:", condition,
+    "<br>Celltype:", celltype,
+    "<br>read_length:", read_length,
+    "<br>Platform:", sequencing_platform,
+    "<br>Aligned:", unique_aligned_reads_over_total,
+    "<br>outlier", is_outlier
+  )
+)) +
+  geom_point(size = 3) +
+  labs(title = "PCA, RNA-seq counts for all 751 samples\ntop 3000 COV expressed genes",
+       color = "celltype", shape = "condition",
+       x = xlab, y = ylab) 
+
+# Then enable the hover text in plotly
+p2_interactive <- ggplotly(p2, tooltip = "text")
+p2_interactive
+```

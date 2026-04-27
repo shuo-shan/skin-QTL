@@ -1,0 +1,299 @@
+---
+title: "fastQTL_MEL"
+author: "Shuo Shan"
+date: "9/21/2021"
+output: html_document
+---
+## fastQTL result analysis of melanocytes: eQTL & reQTL
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load packages.    
+```{r package, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(gridExtra)
+library(plotly)
+
+Dir="/nl/umw_manuel_garber/human/skin/eQTLs/fastQTL/fastQTL/"
+setwd(Dir)
+#save.image(file=paste0(Dir,'/myEnvironment.fastQTL_melanocytes.RData'))
+load(paste0(Dir,'/myEnvironment.fastQTL_melanocytes.RData'))
+```
+
+### Load data.
+```{r load}
+library(qvalue) 
+#d$st = qvalue(d$bpval)$qvalues
+## Load permutation table
+permheader= c("gene", "nvar", "shape1", "shape2", "dummy", "ID", "dist","npval","slope","ppval", "bpval")
+# Phenotype: TMM-normalized CPM of unstimulated melanocytes
+file1 <- read.table(paste0(Dir,"permutations_tmm_normalized_cpm.MEL_PBS.txt"),sep="\t", header=FALSE) %>% set_colnames(permheader)
+#file1$bonferroni = p.adjust(file1$bpval, method="bonferroni")
+file1$fdr = p.adjust(file1$bpval, method="fdr")
+#file1$st = qvalue(file1$bpval)$qvalues
+#file1=file1[abs(file1$slope)>2,] # filter by effect size
+#file1=file1[order(file1$fdr),]
+# Phenotype: log2(TMM-normalized CPM) of unstimulated melanocytes
+plot(hist(file2$bpval))
+file2 <- read.table(paste0(Dir,"permutations_tmm_normalized_log2cpm_MEL_PBS.txt"),sep="\t", header=FALSE) %>% set_colnames(permheader)
+#file2$bonferroni = p.adjust(file2$bpval, method="bonferroni")
+file2$fdr = p.adjust(file2$bpval, method="fdr")
+#file2$st = qvalue(file2$bpval)$qvalues
+#file2=file2[abs(file2$slope)>2,] # filter by effect size
+#file2=file2[order(file2$fdr),]
+# Phenotype: log2 Fold Change of melanocytes (stimulated vs. baselevel)
+file3 <- read.table(paste0(Dir,"permutations_log2FC_p0.05.MEL.txt"),sep="\t", header=FALSE) %>% set_colnames(permheader)
+
+#file3$bonferroni = p.adjust(file3$bpval, method="bonferroni")
+file3$fdr = p.adjust(file3$bpval, method="fdr")
+#file3$st = qvalue(file3$bpval)$qvalues
+#file3=file3[abs(file3$slope)>2,] # filter by effect size
+#file3=file3[order(file3$fdr),]
+
+
+## Load gene model table
+anno <- read.table(paste0(Dir,"gencode.v34.annotation.bed"),sep="\t", header=FALSE) %>% set_colnames(c("gene","chr","start","end","del")) %>% dplyr::select(-del)
+
+## Load genotype table
+# genotype
+genotype <- read.table(paste0(Dir,"fastQTL_selected.genotype.txt"),sep="\t", header=TRUE) 
+# alternative allele dosage
+dosage <- read.table(paste0(Dir,"fastQTL_selected.dosage.txt"),sep="\t", header=TRUE) 
+
+## Load phenotype table
+pheno1 <- read.table(paste0(Dir,"tmm_normalized_cpm.MEL_PBS.bed"),sep="\t",header=T) 
+pheno2 <- read.table(paste0(Dir,"tmm_normalized_log2cpm.MEL_PBS.bed"),sep="\t",header=T)
+pheno3 <- read.table(paste0(Dir,"log2FC_p0.05.MEL.bed"),sep="\t",header=T)
+
+## Load chromatin accessible regions (i.e. ATACseq peaks)
+## Load active enhancer regions (i.e. H3K27ac peaks)
+## Load vitiligo GWAS SNPs
+vitiligo.snps <- read.table("/nl/umw_manuel_garber/human/skin/eQTLs/fastQTL/GWAS_SNPs/efotraits_EFO_0004208_vitiligo_associations-2021-09-21.txt",sep="\t",header=T)
+## Load skin disease GWAS SNPs
+skin.disease.snps <- read.table("/nl/umw_manuel_garber/human/skin/eQTLs/fastQTL/GWAS_SNPs/efotraits_EFO_0000701_skin-diseases_associations-2021-09-21.txt",sep="\t",header=T)
+skin.disease.gene <- read.table("/nl/umw_manuel_garber/human/skin/eQTLs/fastQTL/GWAS_SNPs/genes_skin-disease.txt",sep="\t",header=F)
+## Load published melanocyte eQTLs
+```
+
+### QC
+To check that the beta approximated permutation p-values are well estimated, load the data in R and make the following plot. 
+The expectation is to get all the points along the diagonal as on the plot above. 
+This shows that unsignificant beta approximated p-values are well estimated and therefore that the estimations went well.
+```{r QC}
+d=file3 # options: file1, file2, file3
+plot(d$ppval, d$bpval, xlab="Direct method", ylab="Beta approximation", main="Check plot")
+abline(0, 1, col="red")
+```
+
+### plots
+#### eQTL: log2cpm vs. genotype
+ARNT: high -> low. known melanoma eQTL gene, but different SNP https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6211648/
+AC119673.3: low -> high. 
+AC016924.1: low -> high.
+CRYBB2: low -> high.
+ANKRD19P: 0/0 low, 0/1 high. shows up in this paper: https://www.futuremedicine.com/doi/pdf/10.2217/epi-2020-0440
+
+```{r beehive-eQTL-log2cpm-vs-genotype}
+n=which(file2$gene=="MCHR1")
+g=file2[n,]$gene # gene
+v=file2[n,]$ID # variant
+label.x=paste0("genotype of ",v)
+label.y=paste0("log2(cpm+1) of ",g)
+title.this=paste0("gene-variant pair: ",g,"-",v)
+genotype.this=genotype[genotype$ID==v,] %>% dplyr::select(-c("CHROM","POS","ID")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","genotype")) %>% dplyr::select(-3)
+phenotype.this=pheno2[pheno2$gene==g,] %>% dplyr::select(-c("chr","start","end","gene")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","phenotype"))
+df.this=left_join(genotype.this,phenotype.this,by="donor") %>% dplyr::filter(genotype!="./.")
+df.this$genotype=factor(df.this$genotype, ordered = TRUE, levels = c("0/0", "0/1", "1/1"))
+
+ggplot(df.this,aes(x=genotype,y=phenotype,fill=genotype)) +
+  geom_boxplot(width=.2,alpha=.4) +
+  geom_point() +
+  scale_fill_manual(values=c("#999999", "#E69F00", "#56B4E9")) +
+  xlab(label.x) + ylab(label.y) +
+  theme(legend.position = "none") +
+  ggtitle(title.this)
+```
+
+#### reQTL: log2 fold-change vs. genotype
+ITGA1: upregulation increased. Encodes the alpha 1 subunit of integrin receptors. This protein heterodimerizes with the beta 1 subunit to form a cell-surface receptor for collagen and laminin. The heterodimeric receptor is involved in cell-cell adhesion and may play a role in inflammation and fibrosis
+WASF1: upregulated -> downregulated. actin binding. 
+```{r beehive-responseQTL-log2FC-vs-genotype}
+n=which(file3$gene=="MCHR1")
+g=file3[n,]$gene # gene
+v=file3[n,]$ID # variant
+
+label.x=paste0("genotype of ",v)
+label.y=paste0("log2FC of ",g)
+title.this=paste0("gene-variant pair: ",g,"-",v)
+genotype.this=genotype[genotype$ID==v,] %>% dplyr::select(-c("CHROM","POS","ID")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","genotype")) %>% dplyr::select(c(1,2))
+phenotype.this=pheno3[pheno3$gene==g,] %>% dplyr::select(-c("chr","start","end","gene")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","phenotype"))
+df.this=left_join(genotype.this,phenotype.this,by="donor") %>% dplyr::filter(genotype!="./.")
+df.this$genotype=factor(df.this$genotype, ordered = TRUE, levels = c("0/0", "0/1", "1/1"))
+
+ggplot(df.this,aes(x=genotype,y=phenotype,fill=genotype,label=donor)) +
+  geom_boxplot(width=.2,alpha=.4) +
+  geom_point() +
+  scale_fill_manual(values=c("#999999", "#E69F00", "#56B4E9")) +
+  xlab(label.x) + ylab(label.y) +
+  theme(legend.position = "none") +
+  ggtitle(title.this)
+```
+
+#### eQTL: log2 cpm vs. dosage
+```{r scatter-eQTL-log2cpm-vs-dosage}
+#n=3
+n=which(file2$gene=="IL15RA")
+g=file2[n,]$gene # gene
+v=file2[n,]$ID # variant
+label.x=paste0("dosage of ",v)
+label.y=paste0("log2(cpm+1) of ",g)
+title.this=paste0("gene-variant pair: ",g,"-",v)
+dosage.this=dosage[dosage$ID==v,] %>% dplyr::select(-c("CHROM","POS","ID")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","dosage"))
+phenotype.this=pheno2[pheno2$gene==g,] %>% dplyr::select(-c("chr","start","end","gene")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","phenotype"))
+df.this=left_join(dosage.this,phenotype.this,by="donor")
+
+ggplot(df.this,aes(x=dosage,y=phenotype)) +
+  geom_point() +
+  xlab(label.x) + ylab(label.y) +
+  theme(legend.position = "none") +
+  ggtitle(title.this)
+```
+#### eQTL: cpm vs. genotype
+```{r beehive-eQTL-cpm-vs-genotype}
+n=4
+g=file1[n,]$gene # gene
+v=file1[n,]$ID # variant
+label.x=paste0("genotype of ",v)
+label.y=paste0("cpm of ",g)
+title.this=paste0("gene-variant pair: ",g,"-",v)
+genotype.this=genotype[genotype$ID==v,] %>% dplyr::select(-c("CHROM","POS","ID")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","genotype"))
+phenotype.this=pheno1[pheno1$gene==g,] %>% dplyr::select(-c("chr","start","end","gene")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","phenotype"))
+df.this=left_join(genotype.this,phenotype.this,by="donor") %>% dplyr::filter(genotype!="./.")
+df.this$genotype=factor(df.this$genotype, ordered = TRUE, levels = c("0/0", "0/1", "1/1"))
+
+ggplot(df.this,aes(x=genotype,y=phenotype,fill=genotype)) +
+  geom_boxplot(width=.2,alpha=.4) +
+  geom_point() +
+  scale_fill_manual(values=c("#999999", "#E69F00", "#56B4E9")) +
+  xlab(label.x) + ylab(label.y) +
+  theme(legend.position = "none") +
+  ggtitle(title.this)
+```
+#### reQTL: log2 fold-change vs. dosage
+```{r beehive-responseQTL-log2FC-vs-dosage}
+#n=3
+n=which(file3$gene=="SIL1")
+g=file3[n,]$gene # gene
+v=file3[n,]$ID # variant
+label.x=paste0("dosage of ",v)
+label.y=paste0("log2FC of ",g)
+title.this=paste0("gene-variant pair: ",g,"-",v)
+dosage.this=dosage[dosage$ID==v,] %>% dplyr::select(-c("CHROM","POS","ID")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","dosage"))
+phenotype.this=pheno3[pheno3$gene==g,] %>% dplyr::select(-c("chr","start","end","gene")) %>% t() %>% as.data.frame() %>% rownames_to_column("donor") %>% set_colnames(c("donor","phenotype"))
+df.this=left_join(dosage.this,phenotype.this,by="donor")
+
+ggplot(df.this,aes(x=dosage,y=phenotype)) +
+  geom_point() +
+  xlab(label.x) + ylab(label.y) +
+  theme(legend.position = "none") +
+  ggtitle(title.this)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### intersecting skin-disease GWAS SNPs
+```{r vitiligo-snps}
+overlapping = file2 %>% dplyr::filter(file2$ID %in% skin.disease.snps$Variant)
+overlapping = file2 %>% dplyr::filter(file2$gene %in% skin.disease.gene$V1)
+# summary: can't find any overlapping so far.
+```
+### How to gain more power
+Smaller window of selecting SNPs around TSS = More power
+```{r power-window-size}
+### Load files
+permheader= c("gene", "nvar", "shape1", "shape2", "dummy", "ID", "dist","npval","slope","ppval", "bpval")
+f1 <- read.table(paste0(Dir,"permutations_tmm_normalized_log2cpm_MEL_PBS_2Mb_window.txt"),sep=" ", header=FALSE) %>% set_colnames(permheader) %>% mutate(fdr = p.adjust(.$bpval, method="fdr")) %>% distinct(.,gene,.keep_all=TRUE)
+f2 <- read.table(paste0(Dir,"permutations_tmm_normalized_log2cpm_MEL_PBS.txt"),sep="\t", header=FALSE) %>% set_colnames(permheader) %>% mutate(fdr = p.adjust(.$bpval, method="fdr")) %>% distinct(.,gene,.keep_all=TRUE)
+f3 <- read.table(paste0(Dir,"permutations_tmm_normalized_log2cpm_MEL_PBS_500Kb_window.txt"),sep=" ", header=FALSE) %>% set_colnames(permheader) %>% mutate(fdr = p.adjust(.$bpval, method="fdr")) %>% distinct(.,gene,.keep_all=TRUE)
+f4 <- read.table(paste0(Dir,"permutations_tmm_normalized_log2cpm_MEL_PBS_100Kb_window.txt"),sep=" ", header=FALSE) %>% set_colnames(permheader) %>% mutate(fdr = p.adjust(.$bpval, method="fdr")) %>% distinct(.,gene,.keep_all=TRUE)
+
+### 
+threshold=0.1
+fdr_0.1 <- data.frame(f1=length(f1[f1$fdr<threshold,"gene"]), f2=length(f2[f2$fdr<threshold,"gene"]), f3=length(f3[f3$fdr<threshold,"gene"]),f4=length(f4[f4$fdr<threshold,"gene"]))
+threshold=0.2
+fdr_0.2 <- data.frame(f1=length(f1[f1$fdr<threshold,"gene"]), f2=length(f2[f2$fdr<threshold,"gene"]), f3=length(f3[f3$fdr<threshold,"gene"]),f4=length(f4[f4$fdr<threshold,"gene"]))
+threshold=0.3
+fdr_0.3 <- data.frame(f1=length(f1[f1$fdr<threshold,"gene"]), f2=length(f2[f2$fdr<threshold,"gene"]), f3=length(f3[f3$fdr<threshold,"gene"]),f4=length(f4[f4$fdr<threshold,"gene"]))
+threshold=0.5
+fdr_0.5 <- data.frame(f1=length(f1[f1$fdr<threshold,"gene"]), f2=length(f2[f2$fdr<threshold,"gene"]), f3=length(f3[f3$fdr<threshold,"gene"]),f4=length(f4[f4$fdr<threshold,"gene"]))
+threshold=0.8
+fdr_0.8 <- data.frame(f1=length(f1[f1$fdr<threshold,"gene"]), f2=length(f2[f2$fdr<threshold,"gene"]), f3=length(f3[f3$fdr<threshold,"gene"]),f4=length(f4[f4$fdr<threshold,"gene"]))
+
+df <- rbind(fdr_0.1,fdr_0.2,fdr_0.3,fdr_0.5,fdr_0.8) %>% set_rownames(c("fdr_0.1","fdr_0.2","fdr_0.3","fdr_0.5","fdr_0.8")) %>% set_colnames(c("2Mb","1Mb","500Kb","100Kb"))
+df
+```
+
+Keep SNPs for only those that are:
+- MAF>0.10 for 37 donors
+- biallelic
+- skin-disease GWAS SNPs and those in high LD (r^2>0.6) within 1Mb bp window.
+```{r filter-snps}
+### Load files
+permheader= c("gene", "nvar", "shape1", "shape2", "dummy", "ID", "dist","npval","slope","ppval", "bpval")
+f1 <- read.table("/nl/umw_manuel_garber/human/skin/eQTLs/fastQTL/fastQTL/GWAS_SNP_with_LD/permutations_tmm_normalized_log2cpm_MEL_PBS_SNPs_with_LD.txt",sep=" ", header=FALSE) %>% set_colnames(permheader) %>% mutate(fdr = p.adjust(.$bpval, method="fdr")) %>% distinct(.,gene,.keep_all=TRUE)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

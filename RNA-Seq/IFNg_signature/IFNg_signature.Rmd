@@ -1,0 +1,655 @@
+---
+title: "IFNg_signature"
+author: "Shuo Shan"
+date: "6/14/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+library(dplyr)
+library(tidyverse)
+library(DESeq2)
+library(DEXSeq)
+library(BiocParallel)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggrepel)
+library(ggfortify)
+library(reactable)
+library(edgeR)
+library(gridExtra)
+library(ggpubr)
+library(plotly)
+library(RCurl)
+library(fgsea) # FastGeneSetEncirhmentAnalysis
+
+Dir.mel="/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/melanocytes/pipeline_01122022/analysis"
+Dir.krt="/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/keratinocytes/pipeline_01142022/analysis"
+Dir.frb="/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/fibroblasts/pipeline_01152022/analysis"
+
+Dir="/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/IFNg_signature"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment.RData'))
+#load(paste0(Dir,'/myEnvironment.RData'))
+```
+
+### Load useful functions
+```{r functions}
+gsea_heatmap <- function(fgseaResTidy, gene.in.pathway, f, Dir, gene_of_interest, MSigDBtype) {
+  print("compiling data...")
+  # pathways with sig enrichment score
+  sig.path <- fgseaResTidy$pathway[fgseaResTidy$padj <= 0.05]
+  sig.gen <- unique(na.omit(gene.in.pathway$SYMBOL[gene.in.pathway$pathway %in% sig.path]))
+  
+  # 
+  h.dat <- reshape2::dcast(gene.in.pathway[, c(1,2)], SYMBOL~pathway)
+  rownames(h.dat) <- h.dat$SYMBOL
+  h.dat <- h.dat[, -1]
+  h.dat <- h.dat[rownames(h.dat) %in% sig.gen, ]
+  h.dat <- h.dat[, colnames(h.dat) %in% sig.path]
+  h.dat[!is.na(h.dat)] = 1
+  h.dat[is.na(h.dat)] = 0
+  h.dat.rownames <- rownames(h.dat)
+  h.dat <- h.dat %>% mutate_if(is.character,as.numeric) %>% magrittr::set_rownames(h.dat.rownames)
+  
+  # keep those genes with 3 or more occurences in significant pathways
+  table(data.frame(rowSums(h.dat)))
+  h.dat <- h.dat[data.frame(rowSums(h.dat)) >= 3, ]
+  
+  # get DESeq2 result of the top genes 
+  topTable <- f[f$SYMBOL %in% rownames(h.dat), ]
+  rownames(topTable) <- topTable$SYMBOL
+  # match the order of rownames in toptable with that of h.dat
+  topTableAligned <- topTable[which(rownames(topTable) %in% rownames(h.dat)),]
+  topTableAligned <- topTableAligned[match(rownames(h.dat), rownames(topTableAligned)),]
+  all(rownames(topTableAligned) == rownames(h.dat))
+  print("...done, preparing to plot")
+  
+  # color bar for -log10(adjusted p-value) for sig.genes
+  dfMinusLog10FDRGenes <- data.frame(-log10(
+    topTableAligned[which(rownames(topTableAligned) %in% rownames(h.dat)), 'padj']))
+  dfMinusLog10FDRGenes[dfMinusLog10FDRGenes == 'Inf'] <- 0
+  
+  # color bar for fold changes for sigGenes
+  dfFoldChangeGenes <- data.frame(
+    topTableAligned[which(rownames(topTableAligned) %in% rownames(h.dat)), 'log2FoldChange'])
+  
+  # merge both
+  dfGeneAnno <- data.frame(dfMinusLog10FDRGenes, dfFoldChangeGenes)
+  colnames(dfGeneAnno) <- c('Gene score', 'Log2FC')
+  dfGeneAnno[,2] <- ifelse(dfGeneAnno$Log2FC > 0, 'Up-regulated',
+                           ifelse(dfGeneAnno$Log2FC < 0, 'Down-regulated', 'Unchanged'))
+  colours <- list(
+    'Log2FC' = c('Up-regulated' = 'red', 'Down-regulated' = 'blue'))
+  haGenes <- ComplexHeatmap::rowAnnotation(
+    df = dfGeneAnno,
+    col = colours,
+    width = unit(1,'cm'),
+    annotation_name_side = 'top')
+  
+  # Now a separate color bar for the GSEA enrichment padj. This will 
+  # also contain the enriched term names via annot_text()
+  
+  # colour bar for enrichment score from fgsea results
+  dfEnrichment <- fgseaRes[, c("pathway", "NES")]
+  dfEnrichment <- dfEnrichment[dfEnrichment$pathway %in% colnames(h.dat)]
+  dd <- dfEnrichment$pathway
+  dfEnrichment <- dfEnrichment[, -1]
+  rownames(dfEnrichment) <- dd
+  colnames(dfEnrichment) <- 'Normalized\n Enrichment\n Score'
+  haTerms <- ComplexHeatmap::HeatmapAnnotation(
+    df = dfEnrichment,
+    Term = anno_text(
+      colnames(h.dat),
+      rot = 45,
+      just = 'right',
+      gp = gpar(fontsize = 12)),
+    annotation_height = unit.c(unit(1, 'cm'), unit(8, 'cm')),
+    annotation_name_side = 'left')
+  
+  # now generate the heatmap
+  hmapGSEA <- Heatmap(h.dat,
+                      name = 'GSEA hallmark pathways enrichment',
+                      split = dfGeneAnno[,2],
+                      col = c('0' = 'white', '1' = 'forestgreen'),
+                      rect_gp = gpar(col = 'grey85'),
+                      cluster_rows = TRUE,
+                      show_row_dend = TRUE,
+                      row_title = 'Top Genes',
+                      row_title_side = 'left',
+                      row_title_gp = gpar(fontsize = 11, fontface = 'bold'),
+                      row_title_rot = 90,
+                      show_row_names = TRUE,
+                      row_names_gp = gpar(fontsize = 11, fontface = 'bold'),
+                      row_names_side = 'left',
+                      row_dend_width = unit(35, 'mm'),
+                      cluster_columns = TRUE,
+                      show_column_dend = TRUE,
+                      column_title = 'Enriched terms',
+                      column_title_side = 'top',
+                      column_title_gp = gpar(fontsize = 12, fontface = 'bold'),
+                      column_title_rot = 0,
+                      show_column_names = FALSE,
+                      show_heatmap_legend = FALSE,
+                      clustering_distance_columns = 'euclidean',
+                      clustering_method_columns = 'ward.D2',
+                      clustering_distance_rows = 'euclidean',
+                      clustering_method_rows = 'ward.D2',
+                      bottom_annotation = haTerms)
+  
+  # gene score: -log10(adjusted p-value) for significant genes identified by DESeq2. larger score = smaller p.adj.
+  dev.off()
+  png(paste0("GSEA_enrichment_heatmap_",gene_of_interest,"_against_",MSigDBtype,"-pathways.png"), units="in", width=20, height=0.1*nrow(h.dat), res=500)
+  draw(hmapGSEA + haGenes,
+       heatmap_legend_side = 'right',
+       annotation_legend_side = 'right')
+  dev.off()
+  print("...done! Have a great day :)")
+}
+
+# bar plot: Normalized Enrichment Scores
+gsea_bar_plot <- function(fgseaResTidy, filtered="no", Dir, gene_of_interest, MSigDBtype) {
+  # bar plot: Normalized Enrichment Scores
+  fgseaResTidy$adjPvalue <- ifelse(fgseaResTidy$padj <= 0.05, "significant", "non-significant")
+  cols <- c("non-significant"="grey","significant"="red")
+  
+  if (filtered=="no") {df <- fgseaResTidy} else {df <- fgseaResTidy %>% dplyr::filter(padj<=0.05)}
+  
+  p <- df %>% 
+    ggplot(., aes(reorder(pathway, NES), NES, fill=adjPvalue)) +
+    geom_col(width=0.8) +
+    scale_fill_manual(values=cols) +
+    coord_flip() +
+    labs(x="Pathway", y="Normalized Enrichment Score",
+         title=paste0("GSEA pathways enrichment score for\n",gene_of_interest," against\n ",MSigDBtype," pathways")) + 
+    theme(plot.title = element_text(size=8),
+          axis.text.x=element_text(angle=90, vjust=0.5, hjust=1, size=10),
+          legend.position = "none")
+  
+  p.interactive <- ggplotly(p, width=1200, height=15*nrow(df))
+  htmlwidgets::saveWidget(p.interactive, paste0(Dir,"/GSEA_",gene_of_interest,"_against_",MSigDBtype,"-pathways.html"))
+}
+
+```
+
+### Load data
+```{r load}
+up.krt=read.table(paste0(Dir,"/upregulated_genes_KRT.txt"), header=FALSE) %>% set_colnames("gene")
+up.mel=read.table(paste0(Dir,"/upregulated_genes_MEL.txt"), header=FALSE) %>% set_colnames("gene")
+up.frb=read.table(paste0(Dir,"/upregulated_genes_FRB.txt"), header=FALSE) %>% set_colnames("gene")
+
+down.krt=read.table(paste0(Dir,"/downregulated_genes_KRT.txt"), header=FALSE) %>% set_colnames("gene")
+down.mel=read.table(paste0(Dir,"/downregulated_genes_MEL.txt"), header=FALSE) %>% set_colnames("gene")
+down.frb=read.table(paste0(Dir,"/downregulated_genes_FRB.txt"), header=FALSE) %>% set_colnames("gene")
+
+all.gene.krt=read.table(paste0(Dir,"/genes_used_in_DE_KRT.txt"), header=FALSE) %>% set_colnames("gene")
+all.gene.mel=read.table(paste0(Dir,"/genes_used_in_DE_MEL.txt"), header=FALSE) %>% set_colnames("gene")
+all.gene.frb=read.table(paste0(Dir,"/genes_used_in_DE_FRB.txt"), header=FALSE) %>% set_colnames("gene")
+
+res.krt=read.table(paste0(Dir.krt,"/DESeq2_results_IFNvsPBS.txt"), header=TRUE) %>% mutate(celltype=rep("krt",nrow(.)))
+res.mel=read.table(paste0(Dir.mel,"/DESeq2_results_IFNvsPBS.txt"), header=TRUE) %>% mutate(celltype=rep("mel",nrow(.)))
+res.frb=read.table(paste0(Dir.frb,"/DESeq2_results_IFNvsPBS.txt"), header=TRUE) %>% mutate(celltype=rep("frb",nrow(.)))
+
+common.genes = Reduce(intersect, list(res.frb$gene,res.mel$gene,res.frb$gene))
+res.merged = rbind(res.krt,res.mel,res.frb)
+```
+
+### Check to see which genes are shared across all 3 cell types
+ 234 common_upregulated_genes.txt
+   8 common_downregulated_genes.txt
+```{r common_IFNg_response}
+# common up-regulated genes
+common.up = Reduce(intersect, list(up.krt$gene,up.mel$gene,up.frb$gene))
+write.table(common.up[order(common.up)], file=paste0(Dir,"/common_upregulated_genes.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+# common down-regulated genes
+common.down = Reduce(intersect, list(down.krt$gene,down.mel$gene,down.frb$gene))
+write.table(common.down[order(common.down)], file=paste0(Dir,"/common_downregulated_genes.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+```
+
+### Which genes have cell-type-specific IFNg response? Also differentiate the genes that are cell-type-specific due to a change in response from not being expressed.
+------------------------------------------  
+  187 cts_upregulated_genes_FRB.txt
+    - 64 are not expressed/lowly expressed in KRT
+    - 41 are not expressed/lowly expressed in MEL
+    - 159 are expressed over cutoff threshold in all cell types, but only significantly upregulated in FRB.
+  105 cts_downregulated_genes_FRB.txt
+    - 36 are not/lowly expressed in KRT
+    - 29 are not/lowly expressed in MEL
+    - 88 are expressed over cutoff threshold in all cell types, but only significantly downregulated in FRB.
+------------------------------------------  
+  349 cts_upregulated_genes_KRT.txt
+    - 284 are expressed over cutoff threshold in all cell types, but only significantly upregulated in KRT.
+  339 cts_downregulated_genes_KRT.txt
+    - 282 are expressed over cutoff in all cell types.
+------------------------------------------  
+  871 cts_upregulated_genes_MEL.txt
+    - 770 are expressed over cutoff threshold in all cell types, but only significantly upregulated in MEL.
+  648 cts_downregulated_genes_MEL.txt
+    - 558 are expressed over cutoff threshold in all cell types, but only significantly downregulated in MEL.
+```{r cts_IFNg_response}
+# cts IFNg response in fibroblasts
+temp1<-unique(c(up.krt$gene,up.mel$gene))
+cts.up.frb<-up.frb$gene[which(!up.frb$gene %in% temp1)]
+
+write.table(cts.up.frb[order(cts.up.frb)], file=paste0(Dir,"/cts_upregulated_genes_FRB.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+temp2<-unique(c(down.krt$gene,down.mel$gene))
+cts.down.frb<-down.frb$gene[which(!down.frb$gene %in% temp2)]
+write.table(cts.down.frb[order(cts.down.frb)], file=paste0(Dir,"/cts_downregulated_genes_FRB.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+# cts IFNg response in melanocytes
+temp3<-unique(c(up.frb$gene,up.krt$gene))
+cts.up.mel<-up.mel$gene[which(!up.mel$gene %in% temp3)]
+write.table(cts.up.mel[order(cts.up.mel)], file=paste0(Dir,"/cts_upregulated_genes_MEL.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+temp4<-unique(c(down.frb$gene,down.krt$gene))
+cts.down.mel<-down.mel$gene[which(!down.mel$gene %in% temp4)]
+write.table(cts.down.mel[order(cts.down.mel)], file=paste0(Dir,"/cts_downregulated_genes_MEL.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+
+# cts IFNg response in keratinocytes
+temp5<-unique(c(up.frb$gene,up.mel$gene))
+cts.up.krt<-up.krt$gene[which(!up.krt$gene %in% temp5)]
+write.table(cts.up.krt[order(cts.up.krt)], file=paste0(Dir,"/cts_upregulated_genes_KRT.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+temp6<-unique(c(down.frb$gene,down.mel$gene))
+cts.down.krt<-down.krt$gene[which(!down.krt$gene %in% temp6)]
+write.table(cts.down.krt[order(cts.down.krt)], file=paste0(Dir,"/cts_downregulated_genes_KRT.txt"), quote=F, sep="\t", row.names=F, col.names=F)
+
+rm(temp1,temp2,temp3,temp4,temp5,temp6)
+```
+
+
+### Illustrate the results in Venn Diagram
+```{r venn-up}
+library(VennDiagram)
+library(RColorBrewer)
+# Generate 3 sets of 200 words
+set1 <- up.frb$gene
+set2 <- up.krt$gene
+set3 <- up.mel$gene
+ 
+# Prepare a palette of 3 colors with R colorbrewer:
+
+myCol <- brewer.pal(3, "Pastel2")
+
+# Chart
+venn.diagram(
+        x = list(set1, set2, set3),
+        category.names = c("up.frb" , "up.krt" , "up.mel"),
+        filename = 'venn_diagramm_upregulated_genes.png',
+        output=TRUE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-27, 27, 135),
+        cat.dist = c(0.055, 0.055, 0.085),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+```
+```{r venn-down}
+library(VennDiagram)
+library(RColorBrewer)
+# Generate 3 sets of 200 words
+rm(set1,set2,set3)
+set1 <- down.frb$gene
+set2 <- down.krt$gene
+set3 <- down.mel$gene
+ 
+# Prepare a palette of 3 colors with R colorbrewer:
+
+myCol <- brewer.pal(3, "Pastel2")
+
+# Chart
+venn.diagram(
+        x = list(set1, set2, set3),
+        category.names = c("down.frb" , "down.krt" , "down.mel"),
+        filename = 'venn_diagramm_downregulated_genes.png',
+        output=TRUE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-27, 27, 135),
+        cat.dist = c(0.055, 0.055, 0.085),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+```
+
+### Cytokines or Cytokine receptors
+```{r cytokine}
+library(SignallingSingleCell)
+# https://rdrr.io/github/kgellatl/SignallingSingleCell/man/id_rl.html
+
+#common.up
+
+#common.down
+#cts.up.krt
+#cts.down.krt
+#cts.up.mel
+#cts.down.mel
+#cts.up.frb
+#cts.down.frb
+```
+
+### Fold Change Distribution Violin Plot
+```{r fc-plot-common}
+#violin of common up genes
+this.genes=common.up
+this.df=res.merged %>% dplyr::filter(gene %in% this.genes) 
+this.title="common upregulated genes"
+this.fname="common.up.png"
+png(this.fname, width=800,height=600)
+this.df %>%
+  ggplot( . , aes(x=celltype,y=log2FoldChange,fill=celltype)) +
+  geom_violin(alpha=0.4) +
+  geom_boxplot(width=0.1,alpha=0.4) +
+  theme(text = element_text(size = 20,face="bold")) + 
+  labs(title=this.title, subtitle=paste0(as.character(length(this.genes))," genes")) 
+dev.off()
+
+#violin of common down genes
+this.genes=common.down
+this.df=res.merged %>% dplyr::filter(gene %in% this.genes) 
+this.title="common downregulated genes"
+this.fname="common.down.png"
+png(this.fname, width=800,height=600)
+this.df %>%
+  ggplot( . , aes(x=celltype,y=log2FoldChange,fill=celltype)) +
+  geom_violin(alpha=0.4) +
+  geom_boxplot(width=0.1,alpha=0.4) +
+  theme(text = element_text(size = 20,face="bold")) + 
+  labs(title=this.title, subtitle=paste0(as.character(length(this.genes))," genes")) 
+dev.off()
+
+```
+```{r fc-plot-cts-krt}
+#violin of cts.up.krt genes
+this.genes=cts.up.krt
+this.df=res.merged %>% dplyr::filter(gene %in% this.genes) 
+this.title="keratinocytes-speicfic upregulated genes"
+this.fname="cts.up.krt.png"
+png(this.fname, width=800,height=600)
+this.df %>%
+  ggplot( . , aes(x=celltype,y=log2FoldChange,fill=celltype)) +
+  geom_violin(alpha=0.4) +
+  geom_boxplot(width=0.1,alpha=0.4) +
+  theme(text = element_text(size = 20,face="bold")) + 
+  labs(title=this.title, subtitle=paste0(as.character(length(this.genes))," genes")) 
+dev.off()
+
+#violin of cts.down.krt genes
+this.genes=cts.down.krt
+this.df=res.merged %>% dplyr::filter(gene %in% this.genes) 
+this.title="keratinocytes-speicfic downregulated genes"
+this.fname="cts.down.krt.png"
+png(this.fname, width=800,height=600)
+this.df %>%
+  ggplot( . , aes(x=celltype,y=log2FoldChange,fill=celltype)) +
+  geom_violin(alpha=0.4) +
+  geom_boxplot(width=0.1,alpha=0.4) +
+  theme(text = element_text(size = 20,face="bold")) + 
+  labs(title=this.title, subtitle=paste0(as.character(length(this.genes))," genes")) 
+dev.off()
+
+
+```
+```{r fc-plot-cts-mel}
+#violin of cts.up.mel genes
+this.genes=cts.up.mel
+this.df=res.merged %>% dplyr::filter(gene %in% this.genes) 
+this.title="melanocyte-speicfic upregulated genes"
+this.fname="cts.up.mel.png"
+png(this.fname, width=800,height=600)
+this.df %>%
+  ggplot( . , aes(x=celltype,y=log2FoldChange,fill=celltype)) +
+  geom_violin(alpha=0.4) +
+  geom_boxplot(width=0.1,alpha=0.4) +
+  theme(text = element_text(size = 20,face="bold")) + 
+  labs(title=this.title, subtitle=paste0(as.character(length(this.genes))," genes")) 
+dev.off()
+
+#violin of cts.down.mel genes
+this.genes=cts.down.mel
+this.df=res.merged %>% dplyr::filter(gene %in% this.genes) 
+this.title="melanocyte-speicfic downregulated genes"
+this.fname="cts.down.mel.png"
+png(this.fname, width=800,height=600)
+this.df %>%
+  ggplot( . , aes(x=celltype,y=log2FoldChange,fill=celltype)) +
+  geom_violin(alpha=0.4) +
+  geom_boxplot(width=0.1,alpha=0.4) +
+  theme(text = element_text(size = 20,face="bold")) + 
+  labs(title=this.title, subtitle=paste0(as.character(length(this.genes))," genes")) 
+dev.off()
+
+
+```
+```{r fc-plot-cts-frb}
+#violin of cts.up.frb genes
+this.genes=cts.up.frb
+this.df=res.merged %>% dplyr::filter(gene %in% this.genes) 
+this.title="fibroblast-speicfic upregulated genes"
+this.fname="cts.up.frb.png"
+png(this.fname, width=800,height=600)
+this.df %>%
+  ggplot( . , aes(x=celltype,y=log2FoldChange,fill=celltype)) +
+  geom_violin(alpha=0.4) +
+  geom_boxplot(width=0.1,alpha=0.4) +
+  theme(text = element_text(size = 20,face="bold")) + 
+  labs(title=this.title, subtitle=paste0(as.character(length(this.genes))," genes")) 
+dev.off()
+
+#violin of cts.down.frb genes
+this.genes=cts.down.frb
+this.df=res.merged %>% dplyr::filter(gene %in% this.genes) 
+this.title="fibroblast-speicfic downregulated genes"
+this.fname="cts.down.frb.png"
+png(this.fname, width=800,height=600)
+this.df %>%
+  ggplot( . , aes(x=celltype,y=log2FoldChange,fill=celltype)) +
+  geom_violin(alpha=0.4) +
+  geom_boxplot(width=0.1,alpha=0.4) +
+  theme(text = element_text(size = 20,face="bold")) + 
+  labs(title=this.title, subtitle=paste0(as.character(length(this.genes))," genes")) 
+dev.off()
+
+
+```
+
+
+### Heatmap
+```{r heatmap-data}
+# merge metadata
+metadata.mel=read.table(paste0(Dir.mel,"/metadata.txt"), header=TRUE) %>% dplyr::mutate(celltype=rep("MEL",nrow(.)))
+metadata.krt=read.table(paste0(Dir.krt,"/metadata.txt"), header=TRUE) %>% dplyr::mutate(celltype=rep("KRT",nrow(.)))
+metadata.frb=read.table(paste0(Dir.frb,"/metadata.txt"), header=TRUE) %>% dplyr::mutate(celltype=rep("FRB",nrow(.)))
+metadata=rbind(metadata.mel,metadata.krt,metadata.frb) %>% as.data.frame()
+rownames(metadata)=metadata$sample
+
+# merge logCPM data
+logCPM.mel=read.table(paste0(Dir.mel,"/log2-TMM-normalized-CPM.txt"), header=TRUE) %>% rownames_to_column("gene")
+logCPM.krt=read.table(paste0(Dir.krt,"/log2-TMM-normalized-CPM.txt"), header=TRUE) %>% rownames_to_column("gene")
+logCPM.frb=read.table(paste0(Dir.frb,"/log2-TMM-normalized-CPM.txt"), header=TRUE) %>% rownames_to_column("gene")
+logCPM=left_join(logCPM.frb, left_join(logCPM.mel,logCPM.krt,by="gene"), by="gene") %>% column_to_rownames("gene")
+
+# pick genes of top row variance
+mat.logCPM.lnsd <- apply(logCPM,MARGIN=1,FUN=sd)
+mat.logCPM.lncv <- sqrt( (exp(mat.logCPM.lnsd) )^2 -1) #coefficient of variance
+```
+
+```{r heatmap-top10000}
+logCPM.top <- logCPM[order(mat.logCPM.lncv,decreasing=T),][1:10000,]
+
+# subset logCPM to include top 2000 cov genes and selected samples.
+df=logCPM[rownames(logCPM.top),metadata$sample]
+
+# perform k-means-clustering to determine k_row.
+wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+png("elbow_plot_top10000cov_log2CPM.png", width=800,height=600)
+plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+dev.off()
+
+# heatmap
+library(pheatmap)
+df.meta=metadata[,c("condition","celltype")]
+png("heatmap_top10000cov_log2CPM_unscaled.png", width=800,height=600)
+pheatmap(df, 
+         annotation_col = df.meta,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         cutree_cols = 3,
+         cutree_rows = 5)
+dev.off()
+```
+
+```{r heatmap-IFNg-responsive-genes}
+IFNg.response.genes=res.merged %>% 
+  dplyr::filter(padj<0.05) %>%
+  dplyr::filter(abs(log2FoldChange) > 1.5) %>%
+  pull(gene)
+logCPM.top <- logCPM[IFNg.response.genes,]
+
+# subset logCPM to include top 2000 cov genes and selected samples.
+df=logCPM[rownames(logCPM.top),metadata$sample]
+df<- na.omit(df)
+
+# perform k-means-clustering to determine k_row.
+wss <- (nrow(scale(df))-1)*sum(apply(scale(df),2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(scale(df),centers=i)$withinss)
+png("elbow_plot_IFNg-responsive-genes_log2CPM.png", width=800,height=600)
+plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares") 
+dev.off()
+
+# heatmap
+library(pheatmap)
+df.meta=metadata[,c("condition","celltype")]
+png("heatmap_IFNg-responsive-genes_log2CPM_unscaled.png", width=800,height=600)
+pheatmap(df, 
+         annotation_col = df.meta,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         cutree_cols = 3,
+         cutree_rows = 5)
+dev.off()
+
+png("heatmap_IFNg-responsive-genes_log2CPM_scaled.png", width=800,height=600)
+pheatmap(df, 
+         scale = "row",
+         annotation_col = df.meta,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         cutree_cols = 3,
+         cutree_rows = 5)
+dev.off()
+```
+
+
+### GeneSetEnrichmentAnalysis
+```{r MSigDB-gene-sets}
+# load the MSigDB gene sets into a named list
+pathways.kegg <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c2.cp.kegg.v7.5.1.symbols.gmt")
+# pathways.hallmark <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/h.all.v7.5.1.symbols.gmt")
+#pathways.allcurated <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c2.all.v7.5.1.symbols.gmt")
+# pathways.canonical <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c2.cp.v7.5.1.symbols.gmt")
+# pathways.chemical_and_genetic_perturbations <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c2.cgp.v7.5.1.symbols.gmt")
+# pathways.regulatory_target <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c3.all.v7.5.1.symbols.gmt")
+pathways.ontology <- 	gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c5.all.v7.5.1.symbols.gmt")
+pathways.GO_BP <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c5.go.bp.v7.5.1.symbols.gmt")
+# pathways.GO_MF <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c5.go.mf.v7.5.1.symbols.gmt")
+# pathways.GO_CC <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c5.go.cc.v7.5.1.symbols.gmt")
+#pathways.immunologic_signature <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c7.all.v7.5.1.symbols.gmt")
+# pathways.celltype_signature <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/c8.all.v7.5.1.symbols.gmt")
+#pathways.all <- gmtPathways("/nl/umw_manuel_garber/human/skin/eQTLs/RNA-Seq/GSEA/MSigDB/msigdb.v7.5.1.symbols.gmt")
+pathways <- pathways.ontology
+MSigDBtype="pathways.ontology" # type of MSigDB gene set
+```  
+
+```{r gsea}
+gene.lst=data.frame(SYMBOL=common.up)
+gene_of_interest = "common up-regulated genes"
+
+# create a named vector [ranked genes]
+ranks <- rank(gene.lst$SYMBOL)
+names(ranks) <- gene.lst$SYMBOL
+#barplot(sort(ranks, decreasing = T))
+
+# run fgsea algorithm:
+fgseaRes <- fgseaMultilevel(pathways=pathways, stats=ranks)
+head(fgseaRes[order(padj, -abs(NES)), ], n=10)
+
+# tidy the results:
+fgseaResTidy <- fgseaRes %>% as_tibble %>%
+  arrange(desc(NES)) # order by normalized enrichement score
+
+# to see what genes are in each of these pathways:
+gene.in.pathway <- pathways %>%
+  enframe("pathway", "SYMBOL") %>%
+  unnest(cols=c(SYMBOL)) %>%
+  inner_join(gene.lst, by="SYMBOL")
+# PLOT HEATMAP
+gsea_heatmap(fgseaResTidy, gene.in.pathway, f, Dir, gene_of_interest, MSigDBtype)
+# PLOT BARPLOT
+gsea_bar_plot(fgseaResTidy, filtered="yes", Dir, gene_of_interest, MSigDBtype)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
