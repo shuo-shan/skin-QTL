@@ -22,10 +22,10 @@ this_snp <- args[2]
 this_celltype <- args[3] 
 this_condition <- args[4]
 
-dir <- "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/rs838146"
-this_snp <- "rs838146"
-this_celltype <- "FRB"
-this_condition <- "TNF"
+# dir <- "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/rs2287921"
+# this_snp <- "rs2287921"
+# this_celltype <- "FRB"
+# this_condition <- "TNF"
 
 fimo_file <- paste0(dir, "/fimo_output_", this_snp, ".txt")
 out_file <- paste0(dir, "/fimo_output_analysis_",this_snp,"_",this_celltype,"_",this_condition,".txt")

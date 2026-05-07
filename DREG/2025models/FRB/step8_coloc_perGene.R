@@ -53,10 +53,10 @@ ct <- args[[1]]
 this_gene <- args[[2]]
 GWAS_trait <- args[[3]]
 
-## for testing only
-#ct <- "FRB"
-#this_gene <- "RCC2-AS1"
-#GWAS_trait <- "atopic_dermatitis"
+# # for testing only
+# ct <- "FRB"
+# this_gene <- "RASIP1"
+# GWAS_trait <- "psoriasis"
 
 # ------------------------------
 # Global paths 
@@ -96,6 +96,8 @@ meta_all <- readr::read_tsv(meta_file, show_col_types = FALSE)
 chr <- unique(pairs$gene_chr)
 ciswindow_left <- unique(pairs$gene_start) - 500000
 ciswindow_right <- unique(pairs$gene_start) + 500000
+# ciswindow_left <- 48714048 for testing
+# ciswindow_right <- 48767481 for testing
 this_range <- paste(chr, ciswindow_left, ciswindow_right, sep="_")
 
 # ------------------------------

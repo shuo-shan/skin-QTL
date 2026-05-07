@@ -25,12 +25,12 @@ this_condition <- args[4]
 out_prefix <- paste0(dir, "/fimo_summary_", this_snp, "_", this_celltype, "_", this_condition)
 load(paste0(out_prefix, "objects.RData"))
 
-dir <- "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/rs838146"
-this_snp <- "rs838146"
-this_celltype <- "FRB"
-this_condition <- "TNF"
-out_prefix <- paste0(dir, "/fimo_summary_", this_snp, "_", this_celltype, "_", this_condition)
-load(paste0(out_prefix, "objects.RData"))
+# dir <- "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/rs2287921"
+# this_snp <- "rs2287921"
+# this_celltype <- "FRB"
+# this_condition <- "TNF"
+# out_prefix <- paste0(dir, "/fimo_summary_", this_snp, "_", this_celltype, "_", this_condition)
+# load(paste0(out_prefix, "objects.RData"))
 
 # ─── 1. DERIVE SEQUENCE CONTEXT FROM REFERENCE GENOME SEQUENCE ───────────────
 # Read SNP position and sequences directly from files written by bash

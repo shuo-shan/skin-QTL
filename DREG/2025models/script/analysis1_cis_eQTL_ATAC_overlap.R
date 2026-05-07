@@ -11,11 +11,12 @@ suppressPackageStartupMessages({
   library(emmeans)
   library(future.apply)
   library(msigdbr)
+  library(DESeq2)
 })
+dir.out = "/pi/manuel.garber-umw/human/skin/eQTLs/DREG/2025models/data/cis_eQTL_ATAC_overlap/"
 
 #### --------- PART ONE. COMPILE BIG TABLE ------------ ####
 # ------- compile all sig cis-QTL SNP table for all celltype x condition ------
-dir.out = "/pi/manuel.garber-umw/human/skin/eQTLs/DREG/2025models/data/cis_eQTL_ATAC_overlap/"
 sig_snps_all <- data.frame()
 for (ct in c("FRB","KRT","MEL")) {
   for (cond in c("PBS", "IFNB", "IFNG", "TNF")) {
@@ -182,6 +183,7 @@ fwrite(gene_exprs_annotation_wide, file = paste0(dir.out,"/sig_eGenes_all_cellty
 # ------- join gene annotation back to sig SNP table with ATACseq peaks ----
 sig_snps_big_table <- left_join(sig_snps_all_with_peak, gene_exprs_annotation_wide, by="gene")
 fwrite(sig_snps_big_table, file = paste0(dir.out,"/cisQTL_sigSNPs_ATACpeak_exprDEinduced_annotated.txt"), quote=F, sep="\t")
+
 #### --------- PART TWO. How many QTLs have a candidate regulatory region ------------ ####
 dir.out = "/pi/manuel.garber-umw/human/skin/eQTLs/DREG/2025models/data/cis_eQTL_ATAC_overlap"
 df <- read_tsv(paste0(dir.out,"/cisQTL_sigSNPs_ATACpeak_exprDEinduced_annotated.txt"))
@@ -741,3 +743,317 @@ p_phyloP <- ggplot(phyloP_plot_df,
   )
 
 ggsave(paste0(dir.out, "/phyloP_by_condition.pdf"), p_phyloP, width = 10, height = 5)
+
+###### ---- IFNB low eGene issue: log2FC violin plot ####
+### load data ----
+df <- read_tsv(paste0(dir.out, "/cisQTL_sigSNPs_ATACpeak_exprDEinduced_annotated.txt"))
+load("/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/all_degs_abslog2FC1_padj0.05_post_outlier_exclusion.RData")
+vars <- ls(pattern = "^deg")
+
+# compile all DEGs
+deg_all <- bind_rows(
+  deg.frb.ifnb %>% mutate(celltype = "FRB", condition = "IFNB"),
+  deg.frb.ifng %>% mutate(celltype = "FRB", condition = "IFNG"),
+  deg.frb.tnf  %>% mutate(celltype = "FRB", condition = "TNF"),
+  deg.krt.ifnb %>% mutate(celltype = "KRT", condition = "IFNB"),
+  deg.krt.ifng %>% mutate(celltype = "KRT", condition = "IFNG"),
+  deg.krt.tnf  %>% mutate(celltype = "KRT", condition = "TNF"),
+  deg.mel.ifnb %>% mutate(celltype = "MEL", condition = "IFNB"),
+  deg.mel.ifng %>% mutate(celltype = "MEL", condition = "IFNG"),
+  deg.mel.tnf  %>% mutate(celltype = "MEL", condition = "TNF")
+)
+rm(deg.frb.ifnb, deg.frb.ifng, deg.frb.tnf, 
+   deg.krt.ifnb, deg.krt.ifng, deg.krt.tnf,
+   deg.mel.ifnb, deg.mel.ifng, deg.mel.tnf)
+
+load("/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/all_DESeq2_results_post_outlier_exclusion.RData")
+vars <- ls(pattern = "^res.")
+
+# compile all DESeq2 results
+deseq_res_all <- bind_rows(
+  as.data.frame(res.frb.ifnb) %>% rownames_to_column("gene") %>% mutate(celltype = "FRB", condition = "IFNB"),
+  as.data.frame(res.frb.ifng) %>% rownames_to_column("gene") %>% mutate(celltype = "FRB", condition = "IFNG"),
+  as.data.frame(res.frb.tnf)  %>% rownames_to_column("gene") %>% mutate(celltype = "FRB", condition = "TNF"),
+  as.data.frame(res.krt.ifnb) %>% rownames_to_column("gene") %>% mutate(celltype = "KRT", condition = "IFNB"),
+  as.data.frame(res.krt.ifng) %>% rownames_to_column("gene") %>% mutate(celltype = "KRT", condition = "IFNG"),
+  as.data.frame(res.krt.tnf)  %>% rownames_to_column("gene") %>% mutate(celltype = "KRT", condition = "TNF"),
+  as.data.frame(res.mel.ifnb) %>% rownames_to_column("gene") %>% mutate(celltype = "MEL", condition = "IFNB"),
+  as.data.frame(res.mel.ifng) %>% rownames_to_column("gene") %>% mutate(celltype = "MEL", condition = "IFNG"),
+  as.data.frame(res.mel.tnf)  %>% rownames_to_column("gene") %>% mutate(celltype = "MEL", condition = "TNF")
+)
+rm(res.frb.ifnb, res.frb.ifng, res.frb.tnf, 
+   res.krt.ifnb, res.krt.ifng, res.krt.tnf,
+   res.mel.ifnb, res.mel.ifng, res.mel.tnf)
+
+
+###  [>>> anchor on IFNG eGenes <<<] ----
+# QUESTION 1: Are IFNG eGenes also induced by IFNB? 
+celltypes <- c("FRB", "MEL", "KRT")
+
+gene_table_list <- map(celltypes, function(ct) {
+  
+  # IFNG eGenes for this celltype
+  ifng_egenes <- df %>%
+    filter(celltype == ct, condition == "IFNG", QTLtype == "eQTL") %>%
+    distinct(gene)
+  
+  # log2FC from deg_all for IFNG and IFNB
+  deg_ct <- deg_all %>%
+    filter(celltype == ct, condition %in% c("IFNG", "IFNB")) %>%
+    select(gene, condition, log2FoldChange)
+  
+  ifng_egenes %>%
+    left_join(deg_ct %>% filter(condition == "IFNG") %>%
+                select(gene, log2FC_IFNG = log2FoldChange),
+              by = "gene") %>%
+    left_join(deg_ct %>% filter(condition == "IFNB") %>%
+                select(gene, log2FC_IFNB = log2FoldChange),
+              by = "gene") %>%
+    mutate(
+      celltype = ct,
+      induced_in_IFNG = !is.na(log2FC_IFNG),
+      induced_in_IFNB = !is.na(log2FC_IFNB)
+    )
+}) %>%
+  set_names(celltypes)
+
+# Quick summary for Q1
+map_dfr(celltypes, function(ct) {
+  
+  ifng_induced <- deg_all %>%
+    filter(celltype == ct, condition == "IFNG", padj < 0.05, log2FoldChange > 1.5) %>%
+    distinct(gene)
+  
+  ifng_eg <- df %>%
+    filter(celltype == ct, condition == "IFNG", QTLtype == "eQTL") %>%
+    distinct(gene)
+  
+  ifnb_induced <- deg_all %>%
+    filter(celltype == ct, condition == "IFNB", padj < 0.05, log2FoldChange > 1.5) %>%
+    distinct(gene)
+   
+  # IFNG eGenes that are also IFNG induced
+  ifng_eg_and_induced <- ifng_eg %>%
+    filter(gene %in% ifng_induced$gene)
+  
+  tibble(
+    celltype = ct,
+    n_IFNG_induced = nrow(ifng_induced),
+    n_IFNG_eGenes = nrow(ifng_eg),
+    n_IFNG_induced_eGene = nrow(ifng_eg_and_induced),
+    # NEW: of those, how many also induced in IFNB?
+    n_IFNG_induced_eGene_IFNBinduced = sum(ifng_eg_and_induced$gene %in% ifnb_induced$gene),
+    # and as percentage
+    pct_also_IFNB = round(100 * sum(ifng_eg_and_induced$gene %in% ifnb_induced$gene) / nrow(ifng_eg_and_induced), 1)
+  )
+})
+
+# ============================================================
+# SETUP: define gene sets and log2FC data
+# ============================================================
+
+cytokine_colors <- c(
+  "IFNG_sig"     = "#1E8449",   # dark green
+  "IFNB_sig"     = "#C0392B",   # dark red
+  "IFNB_not_sig" = "#F1948A",   # pink
+  "TNF_sig"      = "#1A5276",   # dark blue
+  "TNF_not_sig"  = "#85C1E9"    # light blue
+)
+
+make_plot_data <- function(anchor_genes_fn) {
+  map_dfr(celltypes, function(ct) {
+    
+    anchor <- anchor_genes_fn(ct)
+    
+    ifnb_sig_genes <- deg_all %>%
+      filter(celltype == ct, condition == "IFNB",
+             padj < 0.05, log2FoldChange > 1.5) %>%
+      pull(gene)
+    
+    tnf_sig_genes <- deg_all %>%
+      filter(celltype == ct, condition == "TNF",
+             padj < 0.05, log2FoldChange > 1.5) %>%
+      pull(gene)
+    
+    deseq_res_all %>%
+      filter(celltype == ct,
+             condition %in% c("IFNG", "IFNB", "TNF"),  # added IFNG
+             gene %in% anchor) %>%
+      select(gene, condition, log2FoldChange) %>%
+      mutate(
+        celltype = ct,
+        sig_group = case_when(
+          condition == "IFNG"  ~ "IFNG_sig",            # IFNG always sig (it's the anchor)
+          condition == "IFNB" & gene %in% ifnb_sig_genes ~ "IFNB_sig",
+          condition == "IFNB" & !gene %in% ifnb_sig_genes ~ "IFNB_not_sig",
+          condition == "TNF"  & gene %in% tnf_sig_genes  ~ "TNF_sig",
+          condition == "TNF"  & !gene %in% tnf_sig_genes ~ "TNF_not_sig"
+        )
+      )
+  })
+}
+
+# ============================================================
+# ANCHOR 1: All IFNG induced genes
+# ============================================================
+anchor_ifng_induced <- function(ct) {
+  deg_all %>%
+    dplyr::filter(celltype == ct, condition == "IFNG",
+           padj < 0.05, log2FoldChange > 1.5) %>%
+    pull(gene)
+}
+
+# ============================================================
+# ANCHOR 2: IFNG induced genes that are also IFNG eGenes
+# ============================================================
+anchor_ifng_induced_egene <- function(ct) {
+  ifng_induced <- deg_all %>%
+    dplyr::filter(celltype == ct, condition == "IFNG",
+           padj < 0.05, log2FoldChange > 1.5) %>%
+    pull(gene)
+  
+  ifng_egenes <- df %>%
+    dplyr::filter(celltype == ct, condition == "IFNG", QTLtype == "eQTL") %>%
+    pull(gene)
+  
+  intersect(ifng_induced, ifng_egenes)
+}
+
+plot_data_induced      <- make_plot_data(anchor_ifng_induced)
+plot_data_induced_egene <- make_plot_data(anchor_ifng_induced_egene)
+
+# ============================================================
+# PLOT FUNCTIONS
+# ============================================================
+
+make_violin <- function(data, title) {
+  
+  # calculate n for each group
+  n_labels <- data %>%
+    ungroup() %>%
+    dplyr::count(sig_group) %>%
+    mutate(
+      sig_group = factor(sig_group, levels = names(cytokine_colors)),
+      label = paste0("n=", n)
+    )
+  
+  data %>%
+    ungroup() %>%
+    mutate(sig_group = factor(sig_group, levels = names(cytokine_colors))) %>%
+    ggplot(aes(x = sig_group, y = log2FoldChange, fill = sig_group)) +
+    geom_violin(trim = TRUE) +
+    geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_hline(yintercept = 1.5, linetype = "dotted", color = "gray50") +
+    geom_text(data = n_labels,
+              aes(x = sig_group, label = label),
+              y = max(data$log2FoldChange, na.rm = TRUE) * 1.05,
+              inherit.aes = FALSE,
+              size = 3.5, color = "gray30") +
+    scale_fill_manual(values = cytokine_colors) +
+    labs(title = title,
+         x = NULL, y = "log2FoldChange", fill = NULL) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 20, hjust = 1))
+}
+
+make_scatter <- function(data, compare_condition, title) {
+  
+  scatter_data <- data %>%
+    dplyr::ungroup() %>%
+    dplyr::filter(condition %in% c("IFNG", compare_condition)) %>%
+    dplyr::select(gene, celltype, condition, log2FoldChange, sig_group) %>%
+    tidyr::pivot_wider(names_from = condition,
+                       values_from = c(log2FoldChange, sig_group)) %>%
+    dplyr::rename(
+      log2FC_IFNG       = log2FoldChange_IFNG,
+      log2FC_compare    = !!sym(paste0("log2FoldChange_", compare_condition)),
+      sig_group_compare = !!sym(paste0("sig_group_", compare_condition))
+    )
+  
+  # unified axis limits
+  axis_min <- min(c(scatter_data$log2FC_IFNG,
+                    scatter_data$log2FC_compare), na.rm = TRUE) * 1.05
+  axis_max <- max(abs(c(scatter_data$log2FC_IFNG,
+                        scatter_data$log2FC_compare)), na.rm = TRUE) * 1.05
+  axis_lim <- c(axis_min, axis_max)
+  
+  scatter_data %>%
+    dplyr::mutate(sig_group_compare = factor(sig_group_compare,
+                                             levels = names(cytokine_colors))) %>%
+    ggplot(aes(x = log2FC_IFNG, y = log2FC_compare,
+               color = sig_group_compare)) +
+    geom_point(alpha = 0.7, size = 2) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_hline(yintercept = 1.5, linetype = "dotted", color = "gray50") +
+    geom_vline(xintercept = 1.5, linetype = "dotted", color = "gray50") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", 
+                color = "gray30", alpha = 0.5) +  # y=x reference line
+    scale_color_manual(values = cytokine_colors, drop = FALSE) +
+    scale_x_continuous(limits = axis_lim) +
+    scale_y_continuous(limits = axis_lim) +
+    labs(
+      title = title,
+      x = "log2FC in IFNG",
+      y = paste0("log2FC in ", compare_condition),
+      color = NULL
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+
+# ============================================================
+# SAVE PDFs — one celltype per page
+# ============================================================
+
+save_pdf <- function(plot_data, plot_fn, filename, title_prefix) {
+  pdf(filename, width = 8, height = 6)
+  for (ct in celltypes) {
+    p <- plot_fn(
+      plot_data %>% filter(celltype == ct),
+      title = paste0(title_prefix, " — ", ct)
+    )
+    print(p)
+  }
+  dev.off()
+  cat("Saved:", filename, "\n")
+}
+
+# Violin plots
+save_pdf(plot_data_induced,
+         make_violin,
+         paste0(dir.out,"/violin_IFNG_induced_genes.pdf"),
+         "IFNG induced genes: log2FC in IFNB and TNF")
+
+save_pdf(plot_data_induced_egene,
+         make_violin,
+         paste0(dir.out,"violin_IFNG_induced_eGenes.pdf"),
+         "IFNG induced eGenes: log2FC in IFNB and TNF")
+
+# scatter
+save_scatter_pdf <- function(plot_data, filename, title_prefix) {
+  pdf(filename, width = 7, height = 6)
+  for (ct in celltypes) {
+    for (cond in c("IFNB", "TNF")) {
+      p <- make_scatter(
+        data = plot_data %>% dplyr::filter(celltype == ct),
+        compare_condition = cond,
+        title = paste0(title_prefix, " — ", ct, " vs ", cond)
+      )
+      print(p)
+    }
+  }
+  dev.off()
+  cat("Saved:", filename, "\n")
+}
+
+# Save scatter PDFs
+save_scatter_pdf(plot_data_induced,
+                 paste0(dir.out, "scatter_IFNG_induced_genes.pdf"),
+                 "IFNG induced genes: IFNG vs")
+
+save_scatter_pdf(plot_data_induced_egene,
+                 paste0(dir.out, "/scatter_IFNG_induced_eGenes.pdf"),
+                 "IFNG induced eGenes: IFNG vs")
